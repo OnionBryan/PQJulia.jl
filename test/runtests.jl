@@ -1,9 +1,6 @@
 using Test
+using PQJulia
 import JSON
-
-# Load the package
-include(joinpath(@__DIR__, "..", "src", "PQJulia.jl"))
-using .PQJulia
 
 println("=" ^ 70)
 println("  PQJulia.jl — Comprehensive Test Suite")
