@@ -42,12 +42,8 @@ using .MLKEM
 include("mldsa.jl")
 using .MLDSA
 
-# SLH-DSA (FIPS 205) — SPHINCS+ Hash-Based Signatures
-include("slh_dsa.jl")
-using .SLHDSA
-
 # Re-export modules
-export MLKEM, MLDSA, SLHDSA
+export MLKEM, MLDSA
 
 # Shamir Secret Sharing
 include("shamir.jl")

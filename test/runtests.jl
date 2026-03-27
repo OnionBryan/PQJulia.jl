@@ -142,21 +142,6 @@ if isdir(kat_dir)
     end
 end
 
-# ==================== SLH-DSA ====================
-
-@testset "SLH-DSA Roundtrip" begin
-    for (name, params) in [("SHAKE-128f", SLHDSA.SHAKE_128F), ("SHAKE-256f", SLHDSA.SHAKE_256F)]
-        @testset "SLH-DSA $name" begin
-            pk, sk = SLHDSA.slh_keygen(params)
-            msg = Vector{UInt8}("test message for SLH-DSA")
-            sig = SLHDSA.slh_sign(msg, sk, params; randomize=false)
-            @test SLHDSA.slh_verify(msg, sig, pk, params)
-            @test !SLHDSA.slh_verify(Vector{UInt8}("tampered"), sig, pk, params)
-            @test length(sig) == params.sig_bytes
-        end
-    end
-end
-
 # ==================== Shamir ====================
 
 @testset "Shamir Secret Sharing" begin
