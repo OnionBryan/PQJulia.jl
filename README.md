@@ -2,7 +2,7 @@
 
 Julia implementations of NIST post-quantum cryptographic standards.
 
-This is a doctoral research project implementing the three FIPS post-quantum standards in pure Julia.
+This is a doctoral research project implementing the two of the FIPS post-quantum standards in pure Julia.
 
 ## What's Implemented
 
@@ -45,7 +45,7 @@ secret = shamir_reconstruct(shares[1:3], 3)
 
 ## Notice
 
-This is research software. It has not been audited for production use.
+This is research software. It has audited against C; however, use at one's own risk in production.
 
 ## References
 
