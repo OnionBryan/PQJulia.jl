@@ -1,8 +1,6 @@
 # PQJulia.jl
 
-Julia implementations of NIST post-quantum cryptographic standards.
-
-This is a doctoral research project implementing the two of the FIPS post-quantum standards in pure Julia.
+Julia implementations of NIST post-quantum cryptographic standards (FIPS 203, 204) in pure Julia.
 
 ## What's Implemented
 
@@ -11,9 +9,9 @@ This is a doctoral research project implementing the two of the FIPS post-quantu
 | FIPS 203 | ML-KEM (Kyber) | 512 / 768 / 1024 |
 | FIPS 204 | ML-DSA (Dilithium) | 44 / 65 / 87 |
 
-Also includes Shamir (k,n)-threshold secret sharing.
+Also includes Shamir (k,n)-threshold secret sharing over GF(2^127 - 1).
 
-Validated against NIST ACVP test vectors where available. ML-KEM and ML-DSA pass 750+ known answer tests. ML-KEM has been cross-validated against the pq-crystals C reference implementation.
+Validated against NIST ACVP test vectors. ML-KEM and ML-DSA pass 677 known answer tests across all parameter sets and operations (KeyGen, Encaps/Decaps, Sign/Verify, including pre-hash variants). ML-KEM has been cross-validated against the pq-crystals C reference implementation.
 
 ## Usage
 
@@ -38,19 +36,20 @@ secret = shamir_reconstruct(shares[1:3], 3)
 ## Security Levels
 
 | Level | ML-KEM | ML-DSA |
-|-------|--------|--------|---------|
+|-------|--------|--------|
 | 1 | Category1 (512) | Category2 (44) |
 | 3 | Category3 (768) | Category3 (65) |
 | 5 | Category5 (1024) | Category5 (87) |
 
 ## Notice
 
-This is research software. It has audited against C; however, use at one's own risk in production.
+This is research software. It has been audited against the pq-crystals C reference; however, use at one's own risk in production. Side-channel resistance is not guaranteed in a JIT-compiled language.
 
 ## References
 
-- [FIPS 203](https://csrc.nist.gov/pubs/fips/203/final)
-- [FIPS 204](https://csrc.nist.gov/pubs/fips/204/final)
+- [FIPS 203 — ML-KEM](https://csrc.nist.gov/pubs/fips/203/final)
+- [FIPS 204 — ML-DSA](https://csrc.nist.gov/pubs/fips/204/final)
+- [pq-crystals Reference Implementations](https://github.com/pq-crystals)
 
 ## License
 
