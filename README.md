@@ -45,7 +45,7 @@ secret = shamir_reconstruct(shares[1:3], 3)
 
 ## Notice
 
-This is research software. It has audited against C; however, use at one's own risk in production.
+This is research software. It has been audited against C; however, use at one's own risk in production.
 
 ## References
 
