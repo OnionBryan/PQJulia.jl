@@ -27,31 +27,58 @@ function use_hint(a::Int32, hint::Bool)::Int32
 end
 
 function poly_uniform_eta!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
-    buf = SHA.shake256(vcat(seed, UInt8[nonce & 0xff, (nonce >> 8) & 0xff]), UInt64(512))
-    ctr = 0; pos = 1
-    while ctr < N && pos <= length(buf)
-        t0 = UInt32(buf[pos]) & 0x0F
-        t1 = UInt32(buf[pos]) >> 4
-        pos += 1
-        if ETA == 2
-            if t0 < 15
-                t0 = t0 - ((205*t0) >> 10)*5  # mod 5 trick
-                ctr += 1; a[ctr] = Int32(2) - Int32(t0)
-            end
-            if t1 < 15 && ctr < N
-                t1 = t1 - ((205*t1) >> 10)*5
-                ctr += 1; a[ctr] = Int32(2) - Int32(t1)
-            end
-        elseif ETA == 4
-            if t0 < 9
-                ctr += 1; a[ctr] = Int32(4) - Int32(t0)
-            end
-            if t1 < 9 && ctr < N
-                ctr += 1; a[ctr] = Int32(4) - Int32(t1)
+    # SHAKE256(seed || nonce_le16) with re-squeeze loop (C ref: poly.c:435-453)
+    # SHAKE256_RATE = 136; initial blocks: eta=2 → 1 block (136B), eta=4 → 2 blocks (272B)
+    input = vcat(seed, UInt8[nonce & 0xff, (nonce >> 8) & 0xff])
+    nblocks_init = ETA == 2 ? 1 : 2
+    total_out = nblocks_init * 136
+    buf = SHA.shake256(input, UInt64(total_out))
+    buflen = total_out
+
+    # Rejection sampling helper (inline, matches C rej_eta)
+    function rej_pass(buf, buflen, a, offset, len)
+        ctr = 0; pos = 1
+        while ctr < len && pos <= buflen
+            t0 = UInt32(buf[pos]) & 0x0F
+            t1 = UInt32(buf[pos]) >> 4
+            pos += 1
+            if ETA == 2
+                if t0 < 15
+                    t0 = t0 - ((205*t0) >> 10)*5
+                    a[offset + ctr + 1] = Int32(2) - Int32(t0)
+                    ctr += 1
+                end
+                if t1 < 15 && ctr < len
+                    t1 = t1 - ((205*t1) >> 10)*5
+                    a[offset + ctr + 1] = Int32(2) - Int32(t1)
+                    ctr += 1
+                end
+            elseif ETA == 4
+                if t0 < 9
+                    a[offset + ctr + 1] = Int32(4) - Int32(t0)
+                    ctr += 1
+                end
+                if t1 < 9 && ctr < len
+                    a[offset + ctr + 1] = Int32(4) - Int32(t1)
+                    ctr += 1
+                end
             end
         end
+        return ctr
     end
-    ctr < N && error("poly_uniform_eta: insufficient samples ($ctr/$N)")
+
+    # First pass
+    ctr = rej_pass(buf, buflen, a, 0, N)
+
+    # Re-squeeze loop: one SHAKE256 block at a time
+    while ctr < N
+        new_total = total_out + 136
+        full_stream = SHA.shake256(input, UInt64(new_total))
+        buf = full_stream[total_out+1:new_total]
+        total_out = new_total
+        ctr += rej_pass(buf, 136, a, ctr, N - ctr)
+    end
+
     return a
 end
 
@@ -218,6 +245,42 @@ function polyw1_pack(a::Vector{Int32})::Vector{UInt8}
     end
     return r
 end
+function polyt0_pack(a::Vector{Int32})::Vector{UInt8}
+    # 13-bit packing: 8 coefficients → 13 bytes. C ref: packing.c:664-702
+    r = zeros(UInt8, POLYT0_PACKED)
+    for i in 0:(N÷8 - 1)
+        ts = [UInt32((1 << (D-1)) - a[8i+k]) for k in 1:8]
+        r[13i+1]  = (ts[1]) % UInt8
+        r[13i+2]  = ((ts[1] >> 8) | (ts[2] << 5)) % UInt8
+        r[13i+3]  = (ts[2] >> 3) % UInt8
+        r[13i+4]  = ((ts[2] >> 11) | (ts[3] << 2)) % UInt8
+        r[13i+5]  = ((ts[3] >> 6) | (ts[4] << 7)) % UInt8
+        r[13i+6]  = (ts[4] >> 1) % UInt8
+        r[13i+7]  = ((ts[4] >> 9) | (ts[5] << 4)) % UInt8
+        r[13i+8]  = (ts[5] >> 4) % UInt8
+        r[13i+9]  = ((ts[5] >> 12) | (ts[6] << 1)) % UInt8
+        r[13i+10] = ((ts[6] >> 7) | (ts[7] << 6)) % UInt8
+        r[13i+11] = (ts[7] >> 2) % UInt8
+        r[13i+12] = ((ts[7] >> 10) | (ts[8] << 3)) % UInt8
+        r[13i+13] = (ts[8] >> 5) % UInt8
+    end
+    return r
+end
+function polyt0_unpack!(r::Vector{Int32}, a::Vector{UInt8})
+    # 13-bit unpacking: 13 bytes → 8 coefficients. C ref: packing.c:712-763
+    for i in 0:(N÷8 - 1)
+        r[8i+1] = Int32(UInt32(a[13i+1]) | (UInt32(a[13i+2]) << 8)) & Int32(0x1FFF)
+        r[8i+2] = Int32((UInt32(a[13i+2]) >> 5) | (UInt32(a[13i+3]) << 3) | (UInt32(a[13i+4]) << 11)) & Int32(0x1FFF)
+        r[8i+3] = Int32((UInt32(a[13i+4]) >> 2) | (UInt32(a[13i+5]) << 6)) & Int32(0x1FFF)
+        r[8i+4] = Int32((UInt32(a[13i+5]) >> 7) | (UInt32(a[13i+6]) << 1) | (UInt32(a[13i+7]) << 9)) & Int32(0x1FFF)
+        r[8i+5] = Int32((UInt32(a[13i+7]) >> 4) | (UInt32(a[13i+8]) << 4) | (UInt32(a[13i+9]) << 12)) & Int32(0x1FFF)
+        r[8i+6] = Int32((UInt32(a[13i+9]) >> 1) | (UInt32(a[13i+10]) << 7)) & Int32(0x1FFF)
+        r[8i+7] = Int32((UInt32(a[13i+10]) >> 6) | (UInt32(a[13i+11]) << 2) | (UInt32(a[13i+12]) << 10)) & Int32(0x1FFF)
+        r[8i+8] = Int32((UInt32(a[13i+12]) >> 3) | (UInt32(a[13i+13]) << 5)) & Int32(0x1FFF)
+        for k in 1:8; r[8i+k] = Int32((1 << (D-1))) - r[8i+k]; end
+    end
+    return r
+end
 # ==================== KEY GENERATION ====================
 
 function dilithium_keygen_derand(xi::Vector{UInt8})
@@ -282,25 +345,7 @@ function dilithium_keygen_derand(xi::Vector{UInt8})
     for i in 1:L; append!(sk, polyeta_pack(s1[i])); end
     for i in 1:K; append!(sk, polyeta_pack(s2[i])); end
     for i in 1:K
-        # polyt0_pack: simplified 13-bit packing
-        buf = zeros(UInt8, POLYT0_PACKED)
-        for idx in 0:(N÷8 - 1)
-            ts = [UInt32((1 << (D-1)) - t0[i][8idx+k]) for k in 1:8]
-            buf[13idx+1]  = (ts[1]) % UInt8
-            buf[13idx+2]  = ((ts[1] >> 8) | (ts[2] << 5)) % UInt8
-            buf[13idx+3]  = (ts[2] >> 3) % UInt8
-            buf[13idx+4]  = ((ts[2] >> 11) | (ts[3] << 2)) % UInt8
-            buf[13idx+5]  = ((ts[3] >> 6) | (ts[4] << 7)) % UInt8
-            buf[13idx+6]  = (ts[4] >> 1) % UInt8
-            buf[13idx+7]  = ((ts[4] >> 9) | (ts[5] << 4)) % UInt8
-            buf[13idx+8]  = (ts[5] >> 4) % UInt8
-            buf[13idx+9]  = ((ts[5] >> 12) | (ts[6] << 1)) % UInt8
-            buf[13idx+10] = ((ts[6] >> 7) | (ts[7] << 6)) % UInt8
-            buf[13idx+11] = (ts[7] >> 2) % UInt8
-            buf[13idx+12] = ((ts[7] >> 10) | (ts[8] << 3)) % UInt8
-            buf[13idx+13] = (ts[8] >> 5) % UInt8
-        end
-        append!(sk, buf)
+        append!(sk, polyt0_pack(t0[i]))
     end
 
     return pk, sk
@@ -313,6 +358,7 @@ end
 # ==================== SIGN ====================
 
 function dilithium_sign_derand(msg::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8}; context::Vector{UInt8}=UInt8[])
+    length(context) > 255 && error("Context string must be ≤ 255 bytes (FIPS 204 §5.2)")
     # Unpack sk
     pos = 1
     rho = sk[pos:pos+SEEDBYTES-1]; pos += SEEDBYTES
@@ -329,21 +375,7 @@ function dilithium_sign_derand(msg::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vecto
     end
     t0 = [zeros(Int32, N) for _ in 1:K]
     for i in 1:K
-        # polyt0_unpack (simplified)
-        buf = sk[pos:pos+POLYT0_PACKED-1]; pos += POLYT0_PACKED
-        for idx in 0:(N÷8 - 1)
-            t0[i][8idx+1] = Int32(UInt32(buf[13idx+1]) | (UInt32(buf[13idx+2]) << 8)) & Int32(0x1FFF)
-            t0[i][8idx+2] = Int32((UInt32(buf[13idx+2]) >> 5) | (UInt32(buf[13idx+3]) << 3) | (UInt32(buf[13idx+4]) << 11)) & Int32(0x1FFF)
-            t0[i][8idx+3] = Int32((UInt32(buf[13idx+4]) >> 2) | (UInt32(buf[13idx+5]) << 6)) & Int32(0x1FFF)
-            t0[i][8idx+4] = Int32((UInt32(buf[13idx+5]) >> 7) | (UInt32(buf[13idx+6]) << 1) | (UInt32(buf[13idx+7]) << 9)) & Int32(0x1FFF)
-            t0[i][8idx+5] = Int32((UInt32(buf[13idx+7]) >> 4) | (UInt32(buf[13idx+8]) << 4) | (UInt32(buf[13idx+9]) << 12)) & Int32(0x1FFF)
-            t0[i][8idx+6] = Int32((UInt32(buf[13idx+9]) >> 1) | (UInt32(buf[13idx+10]) << 7)) & Int32(0x1FFF)
-            t0[i][8idx+7] = Int32((UInt32(buf[13idx+10]) >> 6) | (UInt32(buf[13idx+11]) << 2) | (UInt32(buf[13idx+12]) << 10)) & Int32(0x1FFF)
-            t0[i][8idx+8] = Int32((UInt32(buf[13idx+12]) >> 3) | (UInt32(buf[13idx+13]) << 5)) & Int32(0x1FFF)
-            for k in 1:8
-                t0[i][8idx+k] = Int32((1 << (D-1))) - t0[i][8idx+k]
-            end
-        end
+        polyt0_unpack!(t0[i], sk[pos:pos+POLYT0_PACKED-1]); pos += POLYT0_PACKED
     end
 
     # Expand A, NTT(s1), NTT(s2), NTT(t0)
@@ -363,7 +395,7 @@ function dilithium_sign_derand(msg::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vecto
     # rhoprime = CRH(key || zeros || mu) — deterministic signing
     rhoprime = SHA.shake256(vcat(key, rnd[1:32], mu), UInt64(CRHBYTES))
 
-    nonce = UInt16(0)
+    nonce = 0  # Int, not UInt16 — avoids overflow at 9362 iterations for L=7 (pq-crystals/dilithium#110)
     y = [zeros(Int32, N) for _ in 1:L]
     z = [zeros(Int32, N) for _ in 1:L]
     w1 = [zeros(Int32, N) for _ in 1:K]
@@ -494,6 +526,7 @@ end
 # ==================== VERIFY ====================
 
 function dilithium_verify(msg::Vector{UInt8}, sig::Vector{UInt8}, pk::Vector{UInt8}; context::Vector{UInt8}=UInt8[])
+    length(context) > 255 && error("Context string must be ≤ 255 bytes (FIPS 204 §5.2)")
     length(sig) != SIG_BYTES && return false
 
     # Unpack pk
@@ -684,18 +717,7 @@ function dilithium_sign_prehash(msg::Vector{UInt8}, sk::Vector{UInt8}, hash_alg:
     for i in 1:K; polyeta_unpack!(s2[i], sk[pos:pos+POLYETA_PACKED-1]); pos += POLYETA_PACKED; end
     t0 = [zeros(Int32, N) for _ in 1:K]
     for i in 1:K
-        buf = sk[pos:pos+POLYT0_PACKED-1]; pos += POLYT0_PACKED
-        for idx in 0:(N÷8 - 1)
-            t0[i][8idx+1] = Int32(UInt32(buf[13idx+1]) | (UInt32(buf[13idx+2]) << 8)) & Int32(0x1FFF)
-            t0[i][8idx+2] = Int32((UInt32(buf[13idx+2]) >> 5) | (UInt32(buf[13idx+3]) << 3) | (UInt32(buf[13idx+4]) << 11)) & Int32(0x1FFF)
-            t0[i][8idx+3] = Int32((UInt32(buf[13idx+4]) >> 2) | (UInt32(buf[13idx+5]) << 6)) & Int32(0x1FFF)
-            t0[i][8idx+4] = Int32((UInt32(buf[13idx+5]) >> 7) | (UInt32(buf[13idx+6]) << 1) | (UInt32(buf[13idx+7]) << 9)) & Int32(0x1FFF)
-            t0[i][8idx+5] = Int32((UInt32(buf[13idx+7]) >> 4) | (UInt32(buf[13idx+8]) << 4) | (UInt32(buf[13idx+9]) << 12)) & Int32(0x1FFF)
-            t0[i][8idx+6] = Int32((UInt32(buf[13idx+9]) >> 1) | (UInt32(buf[13idx+10]) << 7)) & Int32(0x1FFF)
-            t0[i][8idx+7] = Int32((UInt32(buf[13idx+10]) >> 6) | (UInt32(buf[13idx+11]) << 2) | (UInt32(buf[13idx+12]) << 10)) & Int32(0x1FFF)
-            t0[i][8idx+8] = Int32((UInt32(buf[13idx+12]) >> 3) | (UInt32(buf[13idx+13]) << 5)) & Int32(0x1FFF)
-            for k in 1:8; t0[i][8idx+k] = Int32((1 << (D-1))) - t0[i][8idx+k]; end
-        end
+        polyt0_unpack!(t0[i], sk[pos:pos+POLYT0_PACKED-1]); pos += POLYT0_PACKED
     end
 
     # Expand A, NTT(s1), NTT(s2), NTT(t0)
@@ -705,7 +727,7 @@ function dilithium_sign_prehash(msg::Vector{UInt8}, sk::Vector{UInt8}, hash_alg:
     for i in 1:K; ntt!(s2[i]); end
     for i in 1:K; ntt!(t0[i]); end
 
-    nonce = UInt16(0)
+    nonce = 0  # Int, not UInt16 — avoids overflow at 9362 iterations for L=7 (pq-crystals/dilithium#110)
     y = [zeros(Int32, N) for _ in 1:L]
     z = [zeros(Int32, N) for _ in 1:L]
     w1 = [zeros(Int32, N) for _ in 1:K]
@@ -856,18 +878,7 @@ function dilithium_sign_internal_mu(mu::Vector{UInt8}, sk::Vector{UInt8}, rnd::V
     for i in 1:K; polyeta_unpack!(s2[i], sk[pos:pos+POLYETA_PACKED-1]); pos += POLYETA_PACKED; end
     t0 = [zeros(Int32, N) for _ in 1:K]
     for i in 1:K
-        buf = sk[pos:pos+POLYT0_PACKED-1]; pos += POLYT0_PACKED
-        for idx in 0:(N÷8 - 1)
-            t0[i][8idx+1] = Int32(UInt32(buf[13idx+1]) | (UInt32(buf[13idx+2]) << 8)) & Int32(0x1FFF)
-            t0[i][8idx+2] = Int32((UInt32(buf[13idx+2]) >> 5) | (UInt32(buf[13idx+3]) << 3) | (UInt32(buf[13idx+4]) << 11)) & Int32(0x1FFF)
-            t0[i][8idx+3] = Int32((UInt32(buf[13idx+4]) >> 2) | (UInt32(buf[13idx+5]) << 6)) & Int32(0x1FFF)
-            t0[i][8idx+4] = Int32((UInt32(buf[13idx+5]) >> 7) | (UInt32(buf[13idx+6]) << 1) | (UInt32(buf[13idx+7]) << 9)) & Int32(0x1FFF)
-            t0[i][8idx+5] = Int32((UInt32(buf[13idx+7]) >> 4) | (UInt32(buf[13idx+8]) << 4) | (UInt32(buf[13idx+9]) << 12)) & Int32(0x1FFF)
-            t0[i][8idx+6] = Int32((UInt32(buf[13idx+9]) >> 1) | (UInt32(buf[13idx+10]) << 7)) & Int32(0x1FFF)
-            t0[i][8idx+7] = Int32((UInt32(buf[13idx+10]) >> 6) | (UInt32(buf[13idx+11]) << 2) | (UInt32(buf[13idx+12]) << 10)) & Int32(0x1FFF)
-            t0[i][8idx+8] = Int32((UInt32(buf[13idx+12]) >> 3) | (UInt32(buf[13idx+13]) << 5)) & Int32(0x1FFF)
-            for k in 1:8; t0[i][8idx+k] = Int32((1 << (D-1))) - t0[i][8idx+k]; end
-        end
+        polyt0_unpack!(t0[i], sk[pos:pos+POLYT0_PACKED-1]); pos += POLYT0_PACKED
     end
 
     A = [zeros(Int32, N) for _ in 1:K, _ in 1:L]
@@ -878,7 +889,7 @@ function dilithium_sign_internal_mu(mu::Vector{UInt8}, sk::Vector{UInt8}, rnd::V
 
     rhoprime = SHA.shake256(vcat(key, rnd, mu), UInt64(CRHBYTES))
 
-    nonce = UInt16(0)
+    nonce = 0  # Int, not UInt16 — avoids overflow at 9362 iterations for L=7 (pq-crystals/dilithium#110)
     y = [zeros(Int32, N) for _ in 1:L]
     z = [zeros(Int32, N) for _ in 1:L]
     w1 = [zeros(Int32, N) for _ in 1:K]

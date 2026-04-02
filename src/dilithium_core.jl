@@ -167,10 +167,17 @@ end
 # ==================== SAMPLING ====================
 
 function poly_uniform!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
-    # SHAKE128(seed || nonce_le16)
-    buf = SHA.shake128(vcat(seed, UInt8[nonce & 0xff, (nonce >> 8) & 0xff]), UInt64(5 * N))
+    # SHAKE128(seed || nonce_le16) with re-squeeze loop (C ref: poly.c:344-368)
+    # SHAKE128_RATE = 168; initial buffer = ceil(768/168) * 168 = 840 bytes (5 blocks)
+    input = vcat(seed, UInt8[nonce & 0xff, (nonce >> 8) & 0xff])
+    nblocks = (768 + 168 - 1) ÷ 168  # = 5
+    total_out = nblocks * 168         # = 840
+    buf = SHA.shake128(input, UInt64(total_out))
+    buflen = total_out
+
+    # First rejection pass
     ctr = 0; pos = 1
-    while ctr < N && pos + 2 <= length(buf)
+    while ctr < N && pos + 2 <= buflen
         t = UInt32(buf[pos]) | (UInt32(buf[pos+1]) << 8) | (UInt32(buf[pos+2]) << 16)
         t &= 0x7FFFFF
         pos += 3
@@ -179,7 +186,35 @@ function poly_uniform!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
             a[ctr] = Int32(t)
         end
     end
-    ctr < N && error("poly_uniform: insufficient samples ($ctr/$N)")
+
+    # Re-squeeze loop: one SHAKE128 block at a time until all N coefficients filled
+    while ctr < N
+        off = buflen % 3  # carry trailing bytes that form an incomplete triple
+        new_total = total_out + 168
+        full_stream = SHA.shake128(input, UInt64(new_total))
+        new_buf = Vector{UInt8}(undef, 168 + off)
+        for i in 1:off
+            new_buf[i] = buf[buflen - off + i]
+        end
+        for i in 1:168
+            new_buf[off + i] = full_stream[total_out + i]
+        end
+        buflen = 168 + off
+        total_out = new_total
+        buf = new_buf
+
+        pos = 1
+        while ctr < N && pos + 2 <= buflen
+            t = UInt32(buf[pos]) | (UInt32(buf[pos+1]) << 8) | (UInt32(buf[pos+2]) << 16)
+            t &= 0x7FFFFF
+            pos += 3
+            if t < UInt32(Q)
+                ctr += 1
+                a[ctr] = Int32(t)
+            end
+        end
+    end
+
     return a
 end
 
