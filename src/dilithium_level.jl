@@ -796,7 +796,7 @@ end
 function dilithium_verify_prehash(msg::Vector{UInt8}, sig::Vector{UInt8}, pk::Vector{UInt8},
                                     hash_alg::String; context::Vector{UInt8}=UInt8[])
     length(context) > 255 && error("Context string must be ≤ 255 bytes (FIPS 204 §5.2)")
-    haskey(HASH_OIDS, hash_alg) || return false
+    haskey(HASH_OIDS, hash_alg) || error("Unknown hash algorithm: $hash_alg")
     oid = HASH_OIDS[hash_alg]
     ph_m = prehash_message(msg, hash_alg)
 

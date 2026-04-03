@@ -42,6 +42,6 @@ export MLKEM, MLDSA
 
 # Shamir Secret Sharing
 include("shamir.jl")
-export shamir_share, shamir_reconstruct
+export shamir_share, shamir_reconstruct, shamir_share_bytes, shamir_reconstruct_bytes
 
 end # module PQJulia
