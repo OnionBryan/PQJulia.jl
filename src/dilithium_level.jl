@@ -946,10 +946,11 @@ function dilithium_sign_internal_mu(mu::Vector{UInt8}, sk::Vector{UInt8}, rnd::V
     end
 end
 
-"""Sign with message (internal interface, externalMu=false). Computes mu = H(tr || msg)."""
+"""Sign with message (internal interface). Applies pure-mode domain separator per FIPS 204."""
 function dilithium_sign_internal_msg(msg::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8})
     tr = sk[2*SEEDBYTES+1:2*SEEDBYTES+TRBYTES]
-    mu = SHA.shake256(vcat(tr, msg), UInt64(CRHBYTES))
+    # FIPS 204 pure mode: pre = [0x00, 0x00] (empty context)
+    mu = SHA.shake256(vcat(tr, UInt8[0x00, 0x00], msg), UInt64(CRHBYTES))
     return dilithium_sign_internal_mu(mu, sk, rnd)
 end
 

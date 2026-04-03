@@ -37,6 +37,7 @@ for (category, params) in CATEGORY_PARAMS
     export dilithium_keygen, dilithium_keygen_derand
     export dilithium_sign, dilithium_sign_derand
     export dilithium_verify
+    export dilithium_sign_prehash, dilithium_verify_prehash
 
     # Import shared primitives from parent
     import ..MLDSA: Q, N, D, ZETAS
