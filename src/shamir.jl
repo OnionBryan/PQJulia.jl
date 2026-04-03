@@ -1,6 +1,8 @@
-# Shamir (k,n)-threshold Secret Sharing over GF(2^127-1)
+# Shamir (k,n)-threshold Secret Sharing
+# Prime must be > any secret value. 2^521-1 is a Mersenne prime that handles
+# secrets up to 520 bits (covers 256-bit keys, 512-bit hashes, etc.)
 
-const PRIME_P = big(2)^127 - 1
+const PRIME_P = big(2)^521 - 1
 
 function mod_inverse(a::Integer, m::Integer)::Integer
     a = mod(a, m)
