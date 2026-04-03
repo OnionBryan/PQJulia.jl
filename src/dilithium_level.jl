@@ -686,6 +686,7 @@ end
 """Sign with pre-hash (HashML-DSA, FIPS 204 Algorithm 4)."""
 function dilithium_sign_prehash(msg::Vector{UInt8}, sk::Vector{UInt8}, hash_alg::String;
                                  hedged::Bool=false, context::Vector{UInt8}=UInt8[])
+    length(context) > 255 && error("Context string must be ≤ 255 bytes (FIPS 204 §5.2)")
     haskey(HASH_OIDS, hash_alg) || error("Unknown hash: $hash_alg")
     oid = HASH_OIDS[hash_alg]
     ph_m = prehash_message(msg, hash_alg)
@@ -794,6 +795,7 @@ end
 """Verify with pre-hash (HashML-DSA, FIPS 204 Algorithm 5)."""
 function dilithium_verify_prehash(msg::Vector{UInt8}, sig::Vector{UInt8}, pk::Vector{UInt8},
                                     hash_alg::String; context::Vector{UInt8}=UInt8[])
+    length(context) > 255 && error("Context string must be ≤ 255 bytes (FIPS 204 §5.2)")
     haskey(HASH_OIDS, hash_alg) || return false
     oid = HASH_OIDS[hash_alg]
     ph_m = prehash_message(msg, hash_alg)

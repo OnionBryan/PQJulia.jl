@@ -137,6 +137,9 @@ if isdir(kat_dir)
             end
         end
     end
+else
+    @warn "KAT directory not found at $kat_dir — all ACVP vector tests skipped"
+    @test_broken false  # Flag that KAT coverage is missing
 end
 
 # ==================== Shamir ====================
