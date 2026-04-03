@@ -53,7 +53,7 @@ for (category, params) in CATEGORY_PARAMS
     import ..MLKEM: kyber_poly_frommsg!, kyber_poly_tomsg!
     import ..MLKEM: kyber_poly_compress!, kyber_poly_decompress!
     import ..MLKEM: kyber_poly_getnoise_eta1!, kyber_poly_getnoise_eta2!
-    import ..MLKEM: kyber_compress, kyber_decompress
+    import ..MLKEM: kyber_decompress
     import ..MLKEM: kyber_hash_h, kyber_hash_g
     import ..MLKEM: kyber_prf, kyber_xof
     import ..MLKEM: kyber_sample_uniform!, kyber_rej_uniform!

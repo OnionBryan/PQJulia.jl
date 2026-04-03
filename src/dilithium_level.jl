@@ -89,8 +89,10 @@ function poly_uniform_gamma1!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt
 end
 
 function poly_challenge!(c::Vector{Int32}, seed::Vector{UInt8})
+    # SampleInBall (C ref: poly.c:487-519). Uses incremental SHAKE256 squeeze.
     fill!(c, Int32(0))
-    buf = SHA.shake256(seed, UInt64(256))
+    total_out = 136  # one SHAKE256 block
+    buf = SHA.shake256(seed, UInt64(total_out))
     signs = UInt64(0)
     for i in 0:7
         signs |= UInt64(buf[i+1]) << (8*i)
@@ -99,6 +101,13 @@ function poly_challenge!(c::Vector{Int32}, seed::Vector{UInt8})
     for i in (N - TAU):(N - 1)
         local b
         while true
+            # Re-squeeze if buffer exhausted (C ref: poly.c:509-512)
+            if pos > length(buf)
+                new_total = total_out + 136
+                full = SHA.shake256(seed, UInt64(new_total))
+                buf = vcat(buf, full[total_out+1:new_total])
+                total_out = new_total
+            end
             b = Int(buf[pos]); pos += 1
             b <= i && break
         end

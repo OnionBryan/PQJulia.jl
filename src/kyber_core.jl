@@ -275,14 +275,18 @@ seeded with seed||i||j.  Uses rejection sampling.
 """
 function kyber_sample_uniform!(r::Vector{Int16}, seed::Vector{UInt8},
                                i::UInt8, j::UInt8)
-    # XOF_BLOCKBYTES = 168 for SHAKE-128; generate enough
-    # GEN_MATRIX_NBLOCKS ~ 3 blocks for Kyber-768
+    # SHAKE-128 rejection sampling with re-squeeze (C ref: indcpa.c:gen_matrix)
+    # SHAKE128_RATE = 168; initial buffer = 4 blocks = 672 bytes
     xof_input = vcat(seed, UInt8[i, j])
-    buf = kyber_xof(xof_input, 168 * 4)  # generous buffer
+    total_out = 168 * 4  # 672 bytes
+    buf = kyber_xof(xof_input, total_out)
     ctr = kyber_rej_uniform!(r, buf)
-    # In extremely rare cases we might need more bytes
+    # Re-squeeze: extend XOF output by one block at a time
     while ctr < KYBER_N
-        extra = kyber_xof(xof_input, 168 * 8)
+        new_total = total_out + 168
+        full = kyber_xof(xof_input, new_total)
+        extra = full[total_out+1:new_total]
+        total_out = new_total
         tmp = Vector{Int16}(undef, KYBER_N - ctr)
         got = kyber_rej_uniform!(tmp, extra)
         for k in 1:min(got, KYBER_N - ctr)
@@ -384,19 +388,6 @@ end
 # ── Compress / Decompress ──────────────────────────────────────────────────
 # Port of pq-crystals/kyber/ref/poly.c: poly_compress / poly_decompress
 # Generic d-bit versions plus the specific d=4 and d=5 optimized versions.
-
-"""
-    kyber_compress(x, d) -> UInt16
-
-Compress: maps x in [0, q) to [0, 2^d) via round(x * 2^d / q).
-Uses the same Barrett-style trick as the C reference for d=4.
-"""
-function kyber_compress(x::Int16, d::Int)
-    # Map to positive representative
-    u = caddq(x)
-    # round(u * 2^d / q) = floor((u * 2^d + q/2) / q)
-    return (((u % UInt32) << d) + UInt32(KYBER_Q) ÷ 2) ÷ UInt32(KYBER_Q) % UInt16 & UInt16((1 << d) - 1)
-end
 
 """
     kyber_decompress(y, d) -> Int16
