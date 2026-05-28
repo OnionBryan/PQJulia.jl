@@ -527,6 +527,7 @@ function dilithium_sign_derand(msg::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vecto
 
     nonce = 0
     y = [zeros(Int32, N) for _ in 1:L]
+    zy = [zeros(Int32, N) for _ in 1:L]
     z = [zeros(Int32, N) for _ in 1:L]
     w1 = [zeros(Int32, N) for _ in 1:K]
     w0 = [zeros(Int32, N) for _ in 1:K]
@@ -539,6 +540,19 @@ function dilithium_sign_derand(msg::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vecto
         compute_w!(w1, w0, A, y, tmp)
 
         c_tilde, cp_hat = compute_challenge(mu, w1, cp)
+        # w = Ay (in NTT domain)
+        for i in 1:L; copyto!(zy[i], y[i]); end
+        for i in 1:L; ntt!(zy[i]); end
+        for i in 1:K
+            fill!(w1[i], Int32(0))
+            for j in 1:L
+                poly_pointwise!(tmp, A[i,j], zy[j])
+                poly_add!(w1[i], w1[i], tmp)
+            end
+            poly_reduce!(w1[i])
+            invntt!(w1[i])
+            poly_caddq!(w1[i])
+        end
 
         if compute_z_and_check_norm!(z, cp_hat, s1, y)
             nonce += 1; continue
@@ -768,6 +782,7 @@ function dilithium_sign_prehash(msg::Vector{UInt8}, sk::Vector{UInt8}, hash_alg:
 
     nonce = 0  # Int, not UInt16 — avoids overflow at 9362 iterations for L=7 (pq-crystals/dilithium#110)
     y = [zeros(Int32, N) for _ in 1:L]
+    zy = [zeros(Int32, N) for _ in 1:L]
     z = [zeros(Int32, N) for _ in 1:L]
     w1 = [zeros(Int32, N) for _ in 1:K]
     w0 = [zeros(Int32, N) for _ in 1:K]
@@ -777,7 +792,7 @@ function dilithium_sign_prehash(msg::Vector{UInt8}, sk::Vector{UInt8}, hash_alg:
 
     while true
         for i in 1:L; poly_uniform_gamma1!(y[i], rhoprime, (L * nonce + i - 1) % UInt16); end
-        zy = [copy(y[i]) for i in 1:L]
+        for i in 1:L; copyto!(zy[i], y[i]); end
         for i in 1:L; ntt!(zy[i]); end
         for i in 1:K
             fill!(w1[i], Int32(0))
@@ -931,6 +946,7 @@ function dilithium_sign_internal_mu(mu::Vector{UInt8}, sk::Vector{UInt8}, rnd::V
 
     nonce = 0  # Int, not UInt16 — avoids overflow at 9362 iterations for L=7 (pq-crystals/dilithium#110)
     y = [zeros(Int32, N) for _ in 1:L]
+    zy = [zeros(Int32, N) for _ in 1:L]
     z = [zeros(Int32, N) for _ in 1:L]
     w1 = [zeros(Int32, N) for _ in 1:K]
     w0 = [zeros(Int32, N) for _ in 1:K]
@@ -940,7 +956,7 @@ function dilithium_sign_internal_mu(mu::Vector{UInt8}, sk::Vector{UInt8}, rnd::V
 
     while true
         for i in 1:L; poly_uniform_gamma1!(y[i], rhoprime, (L * nonce + i - 1) % UInt16); end
-        zy = [copy(y[i]) for i in 1:L]
+        for i in 1:L; copyto!(zy[i], y[i]); end
         for i in 1:L; ntt!(zy[i]); end
         for i in 1:K
             fill!(w1[i], Int32(0))
