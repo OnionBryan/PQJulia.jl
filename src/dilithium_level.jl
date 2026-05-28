@@ -366,9 +366,7 @@ end
 
 # ==================== SIGN ====================
 
-function dilithium_sign_derand(msg::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8}; context::Vector{UInt8}=UInt8[])
-    length(context) > 255 && error("Context string must be ≤ 255 bytes (FIPS 204 §5.2)")
-    # Unpack sk
+function unpack_sk(sk::Vector{UInt8})
     pos = 1
     rho = sk[pos:pos+SEEDBYTES-1]; pos += SEEDBYTES
     key = sk[pos:pos+SEEDBYTES-1]; pos += SEEDBYTES
@@ -386,25 +384,148 @@ function dilithium_sign_derand(msg::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vecto
     for i in 1:K
         polyt0_unpack!(t0[i], sk[pos:pos+POLYT0_PACKED-1]); pos += POLYT0_PACKED
     end
+    return rho, key, tr, s1, s2, t0
+end
 
-    # Expand A, NTT(s1), NTT(s2), NTT(t0)
+function expand_A(rho::Vector{UInt8})
     A = [zeros(Int32, N) for _ in 1:K, _ in 1:L]
     for i in 1:K, j in 1:L
         poly_uniform!(A[i,j], rho, UInt16((i-1) << 8 | (j-1)))
     end
+    return A
+end
+
+function sample_y!(y::Vector{Vector{Int32}}, rhoprime::Vector{UInt8}, nonce::Int)
+    for i in 1:L
+        poly_uniform_gamma1!(y[i], rhoprime, (L * nonce + i - 1) % UInt16)
+    end
+end
+
+function compute_w!(w1::Vector{Vector{Int32}}, w0::Vector{Vector{Int32}}, A::Matrix{Vector{Int32}}, y::Vector{Vector{Int32}}, tmp::Vector{Int32})
+    zy = [copy(y[i]) for i in 1:L]
+    for i in 1:L; ntt!(zy[i]); end
+    for i in 1:K
+        fill!(w1[i], Int32(0))
+        for j in 1:L
+            poly_pointwise!(tmp, A[i,j], zy[j])
+            poly_add!(w1[i], w1[i], tmp)
+        end
+        poly_reduce!(w1[i])
+        invntt!(w1[i])
+        poly_caddq!(w1[i])
+    end
+
+    # Decompose w
+    for i in 1:K
+        for j in 1:N
+            w1[i][j], w0[i][j] = decompose(w1[i][j])
+        end
+    end
+end
+
+function compute_challenge(mu::Vector{UInt8}, w1::Vector{Vector{Int32}}, cp::Vector{Int32})
+    w1_packed = UInt8[]
+    for i in 1:K; append!(w1_packed, polyw1_pack(w1[i])); end
+    c_tilde = SHA.shake256(vcat(mu, w1_packed), UInt64(CTILDEBYTES))
+    poly_challenge!(cp, c_tilde)
+    cp_hat = copy(cp); ntt!(cp_hat)
+    return c_tilde, cp_hat
+end
+
+function compute_z_and_check_norm!(z::Vector{Vector{Int32}}, cp_hat::Vector{Int32}, s1::Vector{Vector{Int32}}, y::Vector{Vector{Int32}})
+    for i in 1:L
+        poly_pointwise!(z[i], cp_hat, s1[i])
+        invntt!(z[i])
+        poly_add!(z[i], z[i], y[i])
+        poly_reduce!(z[i])
+    end
+
+    for i in 1:L
+        if poly_chknorm(z[i], GAMMA1 - BETA)
+            return true
+        end
+    end
+    return false
+end
+
+function compute_w0_and_check_norm!(w0::Vector{Vector{Int32}}, cp_hat::Vector{Int32}, s2::Vector{Vector{Int32}}, tmp::Vector{Int32})
+    for i in 1:K
+        poly_pointwise!(tmp, cp_hat, s2[i])
+        invntt!(tmp)
+        poly_sub!(w0[i], w0[i], tmp)
+        poly_reduce!(w0[i])
+    end
+    for i in 1:K
+        if poly_chknorm(w0[i], GAMMA2 - BETA)
+            return true
+        end
+    end
+    return false
+end
+
+function make_hints_and_check!(h::Vector{Vector{Int32}}, w0::Vector{Vector{Int32}}, w1::Vector{Vector{Int32}}, cp_hat::Vector{Int32}, t0::Vector{Vector{Int32}})
+    # ct0
+    for i in 1:K
+        poly_pointwise!(h[i], cp_hat, t0[i])
+        invntt!(h[i])
+        poly_reduce!(h[i])
+    end
+    for i in 1:K
+        if poly_chknorm(h[i], GAMMA2)
+            return true
+        end
+    end
+
+    # Make hints
+    for i in 1:K
+        poly_add!(w0[i], w0[i], h[i])
+    end
+    hints_count = 0
+    for i in 1:K
+        for j in 1:N
+            h[i][j] = Int32(make_hint(w0[i][j], w1[i][j]))
+            hints_count += h[i][j]
+        end
+    end
+    if hints_count > OMEGA
+        return true
+    end
+    return false
+end
+
+function pack_signature(c_tilde::Vector{UInt8}, z::Vector{Vector{Int32}}, h::Vector{Vector{Int32}})
+    sig = copy(c_tilde)
+    for i in 1:L; append!(sig, polyz_pack(z[i])); end
+    h_packed = zeros(UInt8, OMEGA + K)
+    k_pos = 0
+    for i in 1:K
+        for j in 1:N
+            if h[i][j] != 0
+                h_packed[k_pos + 1] = (j - 1) % UInt8
+                k_pos += 1
+            end
+        end
+        h_packed[OMEGA + i] = (k_pos) % UInt8
+    end
+    append!(sig, h_packed)
+    return sig
+end
+
+function dilithium_sign_derand(msg::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8}; context::Vector{UInt8}=UInt8[])
+    length(context) > 255 && error("Context string must be ≤ 255 bytes (FIPS 204 §5.2)")
+
+    rho, key, tr, s1, s2, t0 = unpack_sk(sk)
+
+    A = expand_A(rho)
     for i in 1:L; ntt!(s1[i]); end
     for i in 1:K; ntt!(s2[i]); end
     for i in 1:K; ntt!(t0[i]); end
 
-    # mu = CRH(tr || msg)
-    # FIPS 204 pure mode: pre = [0x00, ctxlen, ctx...]
     pre = vcat(UInt8[0x00, UInt8(length(context))], context)
     mu = SHA.shake256(vcat(tr, pre, msg), UInt64(CRHBYTES))
-
-    # rhoprime = CRH(key || zeros || mu) — deterministic signing
     rhoprime = SHA.shake256(vcat(key, rnd[1:32], mu), UInt64(CRHBYTES))
 
-    nonce = 0  # Int, not UInt16 — avoids overflow at 9362 iterations for L=7 (pq-crystals/dilithium#110)
+    nonce = 0
     y = [zeros(Int32, N) for _ in 1:L]
     zy = [zeros(Int32, N) for _ in 1:L]
     z = [zeros(Int32, N) for _ in 1:L]
@@ -415,11 +536,10 @@ function dilithium_sign_derand(msg::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vecto
     tmp = zeros(Int32, N)
 
     while true
-        # Sample y
-        for i in 1:L
-            poly_uniform_gamma1!(y[i], rhoprime, (L * nonce + i - 1) % UInt16)
-        end
+        sample_y!(y, rhoprime, nonce)
+        compute_w!(w1, w0, A, y, tmp)
 
+        c_tilde, cp_hat = compute_challenge(mu, w1, cp)
         # w = Ay (in NTT domain)
         for i in 1:L; copyto!(zy[i], y[i]); end
         for i in 1:L; ntt!(zy[i]); end
@@ -434,97 +554,19 @@ function dilithium_sign_derand(msg::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vecto
             poly_caddq!(w1[i])
         end
 
-        # Decompose w
-        for i in 1:K
-            for j in 1:N
-                w1[i][j], w0[i][j] = decompose(w1[i][j])
-            end
+        if compute_z_and_check_norm!(z, cp_hat, s1, y)
+            nonce += 1; continue
         end
 
-        # Challenge
-        w1_packed = UInt8[]
-        for i in 1:K; append!(w1_packed, polyw1_pack(w1[i])); end
-        c_tilde = SHA.shake256(vcat(mu, w1_packed), UInt64(CTILDEBYTES))
-        poly_challenge!(cp, c_tilde)
-        cp_hat = copy(cp); ntt!(cp_hat)
-
-        # z = cs1 + y
-        for i in 1:L
-            poly_pointwise!(z[i], cp_hat, s1[i])
-            invntt!(z[i])
-            poly_add!(z[i], z[i], y[i])
-            poly_reduce!(z[i])
+        if compute_w0_and_check_norm!(w0, cp_hat, s2, tmp)
+            nonce += 1; continue
         end
 
-        # Check ||z||_inf < GAMMA1 - BETA
-        reject = false
-        for i in 1:L
-            if poly_chknorm(z[i], GAMMA1 - BETA)
-                reject = true; break
-            end
+        if make_hints_and_check!(h, w0, w1, cp_hat, t0)
+            nonce += 1; continue
         end
-        if reject; nonce += 1; continue; end
 
-        # w0 = w0 - cs2
-        for i in 1:K
-            poly_pointwise!(tmp, cp_hat, s2[i])
-            invntt!(tmp)
-            poly_sub!(w0[i], w0[i], tmp)
-            poly_reduce!(w0[i])
-        end
-        reject = false
-        for i in 1:K
-            if poly_chknorm(w0[i], GAMMA2 - BETA)
-                reject = true; break
-            end
-        end
-        if reject; nonce += 1; continue; end
-
-        # ct0
-        for i in 1:K
-            poly_pointwise!(h[i], cp_hat, t0[i])
-            invntt!(h[i])
-            poly_reduce!(h[i])
-        end
-        reject = false
-        for i in 1:K
-            if poly_chknorm(h[i], GAMMA2)
-                reject = true; break
-            end
-        end
-        if reject; nonce += 1; continue; end
-
-        # Make hints
-        for i in 1:K
-            poly_add!(w0[i], w0[i], h[i])
-        end
-        hints_count = 0
-        for i in 1:K
-            for j in 1:N
-                h[i][j] = Int32(make_hint(w0[i][j], w1[i][j]))
-                hints_count += h[i][j]
-            end
-        end
-        if hints_count > OMEGA; nonce += 1; continue; end
-
-        # Pack signature
-        sig = copy(c_tilde)
-        for i in 1:L; append!(sig, polyz_pack(z[i])); end
-        # Pack h (sparse)
-        h_packed = zeros(UInt8, OMEGA + K)
-        k_pos = 0
-        for i in 1:K
-            for j in 1:N
-                if h[i][j] != 0
-                    h_packed[k_pos + 1] = (j - 1) % UInt8
-                    k_pos += 1
-                end
-            end
-            h_packed[OMEGA + i] = (k_pos) % UInt8
-        end
-        append!(sig, h_packed)
-
-        return sig
+        return pack_signature(c_tilde, z, h)
     end
 end
 
