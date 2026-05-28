@@ -83,6 +83,42 @@ end
 # Mirrors polyvec.c with KYBER_POLYVECCOMPRESSEDBYTES = K*320 (d=10)
 # 4 coefficients -> 5 bytes (10 bits each)
 
+function compress_du10_block!(r::AbstractVector{UInt8}, idx::Int, a_i::Vector{Int16}, j::Int)
+    t = Vector{UInt16}(undef, 4)
+    for m in 0:3
+        u = caddq(a_i[4j + m + 1])
+        d0 = UInt64(u % UInt16)
+        d0 <<= 10; d0 += 1665; d0 *= 1290167; d0 >>= 32
+        t[m + 1] = UInt16(d0 & 0x3ff)
+    end
+    r[idx]     = (t[1]) % UInt8
+    r[idx + 1] = ((t[1] >> 8) | (t[2] << 2)) % UInt8
+    r[idx + 2] = ((t[2] >> 6) | (t[3] << 4)) % UInt8
+    r[idx + 3] = ((t[3] >> 4) | (t[4] << 6)) % UInt8
+    r[idx + 4] = (t[4] >> 2) % UInt8
+end
+
+function compress_du11_block!(r::AbstractVector{UInt8}, idx::Int, a_i::Vector{Int16}, j::Int)
+    t = Vector{UInt16}(undef, 8)
+    for m in 0:7
+        u = caddq(a_i[8j + m + 1])
+        d0 = UInt64(u % UInt16)
+        d0 <<= 11; d0 += 1664; d0 *= 645084; d0 >>= 31
+        t[m + 1] = UInt16(d0 & 0x7ff)
+    end
+    r[idx]      = (t[1]) % UInt8
+    r[idx + 1]  = ((t[1] >> 8) | (t[2] << 3)) % UInt8
+    r[idx + 2]  = ((t[2] >> 5) | (t[3] << 6)) % UInt8
+    r[idx + 3]  = (t[3] >> 2) % UInt8
+    r[idx + 4]  = ((t[3] >> 10) | (t[4] << 1)) % UInt8
+    r[idx + 5]  = ((t[4] >> 7) | (t[5] << 4)) % UInt8
+    r[idx + 6]  = ((t[5] >> 4) | (t[6] << 7)) % UInt8
+    r[idx + 7]  = (t[6] >> 1) % UInt8
+    r[idx + 8]  = ((t[6] >> 9) | (t[7] << 2)) % UInt8
+    r[idx + 9]  = ((t[7] >> 6) | (t[8] << 5)) % UInt8
+    r[idx + 10] = (t[8] >> 3) % UInt8
+end
+
 function kyber_polyvec_compress!(r::AbstractVector{UInt8},
                                  a::Vector{Vector{Int16}},
                                  k::Int)
@@ -91,18 +127,7 @@ function kyber_polyvec_compress!(r::AbstractVector{UInt8},
         # d=10: 4 coefficients → 5 bytes (ML-KEM-512, ML-KEM-768)
         for i in 1:k
             for j in 0:(KYBER_N ÷ 4 - 1)
-                t = Vector{UInt16}(undef, 4)
-                for m in 0:3
-                    u = caddq(a[i][4j + m + 1])
-                    d0 = UInt64(u % UInt16)
-                    d0 <<= 10; d0 += 1665; d0 *= 1290167; d0 >>= 32
-                    t[m + 1] = UInt16(d0 & 0x3ff)
-                end
-                r[idx]     = (t[1]) % UInt8
-                r[idx + 1] = ((t[1] >> 8) | (t[2] << 2)) % UInt8
-                r[idx + 2] = ((t[2] >> 6) | (t[3] << 4)) % UInt8
-                r[idx + 3] = ((t[3] >> 4) | (t[4] << 6)) % UInt8
-                r[idx + 4] = (t[4] >> 2) % UInt8
+                compress_du10_block!(r, idx, a[i], j)
                 idx += 5
             end
         end
@@ -110,24 +135,7 @@ function kyber_polyvec_compress!(r::AbstractVector{UInt8},
         # d=11: 8 coefficients → 11 bytes (ML-KEM-1024)
         for i in 1:k
             for j in 0:(KYBER_N ÷ 8 - 1)
-                t = Vector{UInt16}(undef, 8)
-                for m in 0:7
-                    u = caddq(a[i][8j + m + 1])
-                    d0 = UInt64(u % UInt16)
-                    d0 <<= 11; d0 += 1664; d0 *= 645084; d0 >>= 31
-                    t[m + 1] = UInt16(d0 & 0x7ff)
-                end
-                r[idx]      = (t[1]) % UInt8
-                r[idx + 1]  = ((t[1] >> 8) | (t[2] << 3)) % UInt8
-                r[idx + 2]  = ((t[2] >> 5) | (t[3] << 6)) % UInt8
-                r[idx + 3]  = (t[3] >> 2) % UInt8
-                r[idx + 4]  = ((t[3] >> 10) | (t[4] << 1)) % UInt8
-                r[idx + 5]  = ((t[4] >> 7) | (t[5] << 4)) % UInt8
-                r[idx + 6]  = ((t[5] >> 4) | (t[6] << 7)) % UInt8
-                r[idx + 7]  = (t[6] >> 1) % UInt8
-                r[idx + 8]  = ((t[6] >> 9) | (t[7] << 2)) % UInt8
-                r[idx + 9]  = ((t[7] >> 6) | (t[8] << 5)) % UInt8
-                r[idx + 10] = (t[8] >> 3) % UInt8
+                compress_du11_block!(r, idx, a[i], j)
                 idx += 11
             end
         end
