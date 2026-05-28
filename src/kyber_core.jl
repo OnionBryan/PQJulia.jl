@@ -474,8 +474,8 @@ function kyber_poly_decompress!(r::Vector{Int16}, a_bytes::AbstractVector{UInt8}
     elseif d == 5
         # 5 bytes → 8 coefficients
         idx = 1
+        t = Vector{UInt8}(undef, 8)
         for i in 0:(KYBER_N ÷ 8 - 1)
-            t = Vector{UInt8}(undef, 8)
             t[1] = a_bytes[idx]
             t[2] = (a_bytes[idx] >> 5) | (a_bytes[idx + 1] << 3)
             t[3] = a_bytes[idx + 1] >> 2
