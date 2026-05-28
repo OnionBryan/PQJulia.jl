@@ -157,6 +157,11 @@ end
             @test shamir_reconstruct([shares[i] for i in combo], 3) == big(123456789)
         end
     end
+    @testset "Error handling" begin
+        shares = shamir_share(big(123), 3, 5)
+        duplicate_shares = [shares[1], shares[2], shares[1]]
+        @test_throws ArgumentError shamir_reconstruct(duplicate_shares, 3)
+    end
 end
 
 println("\n" * "=" ^ 70)
