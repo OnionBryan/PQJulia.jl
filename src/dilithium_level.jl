@@ -406,6 +406,7 @@ function dilithium_sign_derand(msg::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vecto
 
     nonce = 0  # Int, not UInt16 — avoids overflow at 9362 iterations for L=7 (pq-crystals/dilithium#110)
     y = [zeros(Int32, N) for _ in 1:L]
+    zy = [zeros(Int32, N) for _ in 1:L]
     z = [zeros(Int32, N) for _ in 1:L]
     w1 = [zeros(Int32, N) for _ in 1:K]
     w0 = [zeros(Int32, N) for _ in 1:K]
@@ -420,7 +421,7 @@ function dilithium_sign_derand(msg::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vecto
         end
 
         # w = Ay (in NTT domain)
-        zy = [copy(y[i]) for i in 1:L]
+        for i in 1:L; copyto!(zy[i], y[i]); end
         for i in 1:L; ntt!(zy[i]); end
         for i in 1:K
             fill!(w1[i], Int32(0))
@@ -739,6 +740,7 @@ function dilithium_sign_prehash(msg::Vector{UInt8}, sk::Vector{UInt8}, hash_alg:
 
     nonce = 0  # Int, not UInt16 — avoids overflow at 9362 iterations for L=7 (pq-crystals/dilithium#110)
     y = [zeros(Int32, N) for _ in 1:L]
+    zy = [zeros(Int32, N) for _ in 1:L]
     z = [zeros(Int32, N) for _ in 1:L]
     w1 = [zeros(Int32, N) for _ in 1:K]
     w0 = [zeros(Int32, N) for _ in 1:K]
@@ -748,7 +750,7 @@ function dilithium_sign_prehash(msg::Vector{UInt8}, sk::Vector{UInt8}, hash_alg:
 
     while true
         for i in 1:L; poly_uniform_gamma1!(y[i], rhoprime, (L * nonce + i - 1) % UInt16); end
-        zy = [copy(y[i]) for i in 1:L]
+        for i in 1:L; copyto!(zy[i], y[i]); end
         for i in 1:L; ntt!(zy[i]); end
         for i in 1:K
             fill!(w1[i], Int32(0))
@@ -902,6 +904,7 @@ function dilithium_sign_internal_mu(mu::Vector{UInt8}, sk::Vector{UInt8}, rnd::V
 
     nonce = 0  # Int, not UInt16 — avoids overflow at 9362 iterations for L=7 (pq-crystals/dilithium#110)
     y = [zeros(Int32, N) for _ in 1:L]
+    zy = [zeros(Int32, N) for _ in 1:L]
     z = [zeros(Int32, N) for _ in 1:L]
     w1 = [zeros(Int32, N) for _ in 1:K]
     w0 = [zeros(Int32, N) for _ in 1:K]
@@ -911,7 +914,7 @@ function dilithium_sign_internal_mu(mu::Vector{UInt8}, sk::Vector{UInt8}, rnd::V
 
     while true
         for i in 1:L; poly_uniform_gamma1!(y[i], rhoprime, (L * nonce + i - 1) % UInt16); end
-        zy = [copy(y[i]) for i in 1:L]
+        for i in 1:L; copyto!(zy[i], y[i]); end
         for i in 1:L; ntt!(zy[i]); end
         for i in 1:K
             fill!(w1[i], Int32(0))
