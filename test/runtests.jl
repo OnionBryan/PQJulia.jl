@@ -8,6 +8,21 @@ println("=" ^ 70)
 
 # ==================== ML-KEM ====================
 
+import SHA
+
+@testset "ML-KEM internal functions" begin
+    for (name, Cat) in [("512", MLKEM.Category1), ("768", MLKEM.Category3), ("1024", MLKEM.Category5)]
+        @testset "kyber_rkprf ($name)" begin
+            for _ in 1:10
+                key = rand(UInt8, 32)
+                input = rand(UInt8, 32)
+                expected = SHA.shake256(vcat(key, input), UInt64(32))
+                @test Cat.kyber_rkprf(key, input) == expected
+            end
+        end
+    end
+end
+
 @testset "ML-KEM Roundtrip (all levels)" begin
     for (name, Cat) in [("512", MLKEM.Category1), ("768", MLKEM.Category3), ("1024", MLKEM.Category5)]
         @testset "ML-KEM-$name" begin
