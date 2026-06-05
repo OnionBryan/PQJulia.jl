@@ -157,6 +157,14 @@ end
             @test shamir_reconstruct([shares[i] for i in combo], 3) == big(123456789)
         end
     end
+    @testset "Byte-level roundtrip" begin
+        for nbytes in [16, 32, 64]
+            secret_bytes = rand(UInt8, nbytes)
+            shares = shamir_share_bytes(secret_bytes, 3, 5)
+            @test shamir_reconstruct_bytes([shares[1], shares[2], shares[3]], 3, nbytes) == secret_bytes
+            @test shamir_reconstruct_bytes([shares[2], shares[4], shares[5]], 3, nbytes) == secret_bytes
+        end
+    end
 end
 
 println("\n" * "=" ^ 70)
