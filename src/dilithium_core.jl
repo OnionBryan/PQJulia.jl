@@ -72,7 +72,7 @@ end
 
 # ==================== NTT ====================
 
-function ntt!(a::Vector{Int32})
+function ntt!(a::AbstractVector{Int32})
     k = 1  # 1-indexed: zetas[1]=0 (unused), start at k=1 then pre-increment
     len = 128
     while len >= 1
@@ -92,7 +92,7 @@ function ntt!(a::Vector{Int32})
     return a
 end
 
-function invntt!(a::Vector{Int32})
+function invntt!(a::AbstractVector{Int32})
     f = Int32(41978)  # mont^2/256
     k = N + 1  # 1-indexed: start at 257, pre-decrement
     len = 1
@@ -127,34 +127,34 @@ end
 
 # ==================== POLY OPS ====================
 
-function poly_pointwise!(c::Vector{Int32}, a::Vector{Int32}, b::Vector{Int32})
+function poly_pointwise!(c::AbstractVector{Int32}, a::AbstractVector{Int32}, b::AbstractVector{Int32})
     for i in 1:N
         c[i] = montgomery_reduce(Int64(a[i]) * Int64(b[i]))
     end
     return c
 end
 
-function poly_add!(c::Vector{Int32}, a::Vector{Int32}, b::Vector{Int32})
+function poly_add!(c::AbstractVector{Int32}, a::AbstractVector{Int32}, b::AbstractVector{Int32})
     for i in 1:N; c[i] = a[i] + b[i]; end; return c
 end
 
-function poly_sub!(c::Vector{Int32}, a::Vector{Int32}, b::Vector{Int32})
+function poly_sub!(c::AbstractVector{Int32}, a::AbstractVector{Int32}, b::AbstractVector{Int32})
     for i in 1:N; c[i] = a[i] - b[i]; end; return c
 end
 
-function poly_reduce!(a::Vector{Int32})
+function poly_reduce!(a::AbstractVector{Int32})
     for i in 1:N; a[i] = reduce32(a[i]); end; return a
 end
 
-function poly_caddq!(a::Vector{Int32})
+function poly_caddq!(a::AbstractVector{Int32})
     for i in 1:N; a[i] = caddq(a[i]); end; return a
 end
 
-function poly_shiftl!(a::Vector{Int32})
+function poly_shiftl!(a::AbstractVector{Int32})
     for i in 1:N; a[i] <<= D; end; return a
 end
 
-function poly_chknorm(a::Vector{Int32}, bound::Int32)::Bool
+function poly_chknorm(a::AbstractVector{Int32}, bound::Int32)::Bool
     bound > div(Q - 1, 8) && return true
     for i in 1:N
         t = a[i] >> 31
@@ -166,7 +166,7 @@ end
 
 # ==================== SAMPLING ====================
 
-function poly_uniform!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
+function poly_uniform!(a::AbstractVector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
     # SHAKE128(seed || nonce_le16) with re-squeeze loop (C ref: poly.c:344-368)
     # SHAKE128_RATE = 168; initial buffer = ceil(768/168) * 168 = 840 bytes (5 blocks)
     input = vcat(seed, UInt8[nonce & 0xff, (nonce >> 8) & 0xff])
