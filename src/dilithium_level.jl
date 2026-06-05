@@ -316,17 +316,20 @@ function dilithium_keygen_derand(xi::Vector{UInt8})
     end
 
     # t = As1 + s2
-    s1hat = [copy(s) for s in s1]
-    for i in 1:L; ntt!(s1hat[i]); end
-
     t = [zeros(Int32, N) for _ in 1:K]
     tmp = zeros(Int32, N)
-    for i in 1:K
-        fill!(t[i], Int32(0))
-        for j in 1:L
-            poly_pointwise!(tmp, A[i,j], s1hat[j])
+    s1hat_j = zeros(Int32, N)
+
+    for j in 1:L
+        copyto!(s1hat_j, s1[j])
+        ntt!(s1hat_j)
+        for i in 1:K
+            poly_pointwise!(tmp, A[i,j], s1hat_j)
             poly_add!(t[i], t[i], tmp)
         end
+    end
+
+    for i in 1:K
         poly_reduce!(t[i])
         invntt!(t[i])
         poly_add!(t[i], t[i], s2[i])
