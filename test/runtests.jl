@@ -145,6 +145,16 @@ end
 # ==================== Shamir ====================
 
 @testset "Shamir Secret Sharing" begin
+    @testset "mod_inverse" begin
+        # Valid cases
+        @test PQJulia.mod_inverse(3, 11) == 4
+        @test PQJulia.mod_inverse(10, 17) == 12
+        @test PQJulia.mod_inverse(-3, 11) == 7
+
+        # Error cases
+        @test_throws ArgumentError PQJulia.mod_inverse(2, 4)
+        @test_throws ArgumentError PQJulia.mod_inverse(3, 9)
+    end
     @testset "Basic roundtrip" begin
         for secret in [0, 1, 42, 1000, big(2)^126]
             shares = shamir_share(secret, 3, 5)
