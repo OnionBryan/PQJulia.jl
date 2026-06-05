@@ -300,17 +300,17 @@ function dilithium_keygen_derand(xi::Vector{UInt8})
     key = expanded[SEEDBYTES+CRHBYTES+1:2*SEEDBYTES+CRHBYTES]
 
     # Expand A
-    A = [zeros(Int32, N) for _ in 1:K, _ in 1:L]
+    A = [Vector{Int32}(undef, N) for _ in 1:K, _ in 1:L]
     for i in 1:K, j in 1:L
         poly_uniform!(A[i,j], rho, UInt16((i-1) << 8 | (j-1)))
     end
 
     # Sample s1, s2
-    s1 = [zeros(Int32, N) for _ in 1:L]
+    s1 = [Vector{Int32}(undef, N) for _ in 1:L]
     for i in 1:L
         poly_uniform_eta!(s1[i], rhoprime, UInt16(i-1))
     end
-    s2 = [zeros(Int32, N) for _ in 1:K]
+    s2 = [Vector{Int32}(undef, N) for _ in 1:K]
     for i in 1:K
         poly_uniform_eta!(s2[i], rhoprime, UInt16(L + i - 1))
     end
@@ -319,8 +319,8 @@ function dilithium_keygen_derand(xi::Vector{UInt8})
     s1hat = [copy(s) for s in s1]
     for i in 1:L; ntt!(s1hat[i]); end
 
-    t = [zeros(Int32, N) for _ in 1:K]
-    tmp = zeros(Int32, N)
+    t = [Vector{Int32}(undef, N) for _ in 1:K]
+    tmp = Vector{Int32}(undef, N)
     for i in 1:K
         fill!(t[i], Int32(0))
         for j in 1:L
@@ -334,8 +334,8 @@ function dilithium_keygen_derand(xi::Vector{UInt8})
     end
 
     # power2round: t = t1*2^D + t0
-    t1 = [zeros(Int32, N) for _ in 1:K]
-    t0 = [zeros(Int32, N) for _ in 1:K]
+    t1 = [Vector{Int32}(undef, N) for _ in 1:K]
+    t0 = [Vector{Int32}(undef, N) for _ in 1:K]
     for i in 1:K
         for j in 1:N
             t1[i][j], t0[i][j] = power2round(t[i][j])
