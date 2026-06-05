@@ -2,6 +2,8 @@
 # Prime must be > any secret value. 2^521-1 (13th Mersenne prime) handles
 # secrets up to 520 bits (covers 256-bit keys, 512-bit hashes, etc.)
 
+import Random
+
 const PRIME_P = big(2)^521 - 1
 
 function mod_inverse(a::Integer, m::Integer)::Integer
@@ -27,12 +29,12 @@ function shamir_share(secret::Integer, k::Int, n::Int, p::Integer=PRIME_P)
     coeffs = Vector{BigInt}(undef, k)
     coeffs[1] = BigInt(secret)
     for j in 2:k
-        coeffs[j] = rand(big(0):(p-1))
+        coeffs[j] = rand(Random.RandomDevice(), big(0):(p-1))
     end
     # Ensure leading coefficient is nonzero to preserve threshold
     # (rwot8 best practice: zero leading coeff reduces threshold by 1)
     if k >= 2 && coeffs[k] == 0
-        coeffs[k] = rand(big(1):(p-1))
+        coeffs[k] = rand(Random.RandomDevice(), big(1):(p-1))
     end
 
     # Evaluate polynomial at x=1..n using Horner's method
