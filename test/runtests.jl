@@ -157,6 +157,13 @@ end
             @test shamir_reconstruct([shares[i] for i in combo], 3) == big(123456789)
         end
     end
+    @testset "Byte-level API" begin
+        # 32-byte secret (e.g., 256-bit key)
+        secret_bytes = rand(UInt8, 32)
+        shares = shamir_share_bytes(secret_bytes, 3, 5)
+        reconstructed = shamir_reconstruct_bytes(shares, 3, 32)
+        @test reconstructed == secret_bytes
+    end
 end
 
 println("\n" * "=" ^ 70)
