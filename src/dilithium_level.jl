@@ -361,7 +361,7 @@ function dilithium_keygen_derand(xi::Vector{UInt8})
 end
 
 function dilithium_keygen()
-    return dilithium_keygen_derand(rand(UInt8, SEEDBYTES))
+    return dilithium_keygen_derand(rand(Random.RandomDevice(), UInt8, SEEDBYTES))
 end
 
 # ==================== SIGN ====================
@@ -571,7 +571,7 @@ function dilithium_sign_derand(msg::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vecto
 end
 
 function dilithium_sign(msg::Vector{UInt8}, sk::Vector{UInt8}; hedged::Bool=false, context::Vector{UInt8}=UInt8[])
-    rnd = hedged ? rand(UInt8, 32) : zeros(UInt8, 32)
+    rnd = hedged ? rand(Random.RandomDevice(), UInt8, 32) : zeros(UInt8, 32)
     return dilithium_sign_derand(msg, sk, rnd; context=context)
 end
 
@@ -742,7 +742,7 @@ function dilithium_sign_prehash(msg::Vector{UInt8}, sk::Vector{UInt8}, hash_alg:
     # We need to modify the mu derivation to use pre instead of the standard pure prefix
     # Since sign_derand constructs: pre_pure = [0x00, ctxlen, ctx...]; mu = H(tr || pre_pure || msg)
     # For prehash: mu = H(tr || pre)  (pre already contains everything)
-    rnd = hedged ? rand(UInt8, 32) : zeros(UInt8, 32)
+    rnd = hedged ? rand(Random.RandomDevice(), UInt8, 32) : zeros(UInt8, 32)
 
     # Extract sk components to compute mu directly
     pos = 1
