@@ -411,9 +411,8 @@ function kyber_poly_compress!(r_bytes::AbstractVector{UInt8}, a::Vector{Int16}, 
         # 8 coefficients → 4 bytes (4 bits each, packed in pairs)
         idx = 1
         for i in 0:(KYBER_N ÷ 8 - 1)
-            t = Vector{UInt8}(undef, 8)
-            for j in 0:7
-                u = caddq(a[8i + j + 1])
+            t = ntuple(8) do j
+                u = caddq(a[8i + j])
                 # Optimized Barrett-style: (u << 4) + 1665, * 80635, >> 28
                 # Use `% UInt32` to match C's silent int16_t → uint32_t conversion
                 # (UInt32(u) would throw InexactError on negative Int16)
@@ -421,7 +420,7 @@ function kyber_poly_compress!(r_bytes::AbstractVector{UInt8}, a::Vector{Int16}, 
                 d0 += 1665
                 d0 *= 80635
                 d0 >>= 28
-                t[j + 1] = UInt8(d0 & 0x0f)
+                UInt8(d0 & 0x0f)
             end
             r_bytes[idx]     = t[1] | (t[2] << 4)
             r_bytes[idx + 1] = t[3] | (t[4] << 4)
@@ -433,15 +432,14 @@ function kyber_poly_compress!(r_bytes::AbstractVector{UInt8}, a::Vector{Int16}, 
         # 8 coefficients → 5 bytes (5 bits each)
         idx = 1
         for i in 0:(KYBER_N ÷ 8 - 1)
-            t = Vector{UInt8}(undef, 8)
-            for j in 0:7
-                u = caddq(a[8i + j + 1])
+            t = ntuple(8) do j
+                u = caddq(a[8i + j])
                 # Use `% UInt32` to match C's silent int16_t → uint32_t conversion
                 d0 = (u % UInt32) << 5
                 d0 += 1664
                 d0 *= 40318
                 d0 >>= 27
-                t[j + 1] = UInt8(d0 & 0x1f)
+                UInt8(d0 & 0x1f)
             end
             r_bytes[idx]     = t[1] | (t[2] << 5)
             r_bytes[idx + 1] = (t[2] >> 3) | (t[3] << 2) | (t[4] << 7)
@@ -475,19 +473,23 @@ function kyber_poly_decompress!(r::Vector{Int16}, a_bytes::AbstractVector{UInt8}
         # 5 bytes → 8 coefficients
         idx = 1
         for i in 0:(KYBER_N ÷ 8 - 1)
-            t = Vector{UInt8}(undef, 8)
-            t[1] = a_bytes[idx]
-            t[2] = (a_bytes[idx] >> 5) | (a_bytes[idx + 1] << 3)
-            t[3] = a_bytes[idx + 1] >> 2
-            t[4] = (a_bytes[idx + 1] >> 7) | (a_bytes[idx + 2] << 1)
-            t[5] = (a_bytes[idx + 2] >> 4) | (a_bytes[idx + 3] << 4)
-            t[6] = a_bytes[idx + 3] >> 1
-            t[7] = (a_bytes[idx + 3] >> 6) | (a_bytes[idx + 4] << 2)
-            t[8] = a_bytes[idx + 4] >> 3
+            t1 = a_bytes[idx]
+            t2 = (a_bytes[idx] >> 5) | (a_bytes[idx + 1] << 3)
+            t3 = a_bytes[idx + 1] >> 2
+            t4 = (a_bytes[idx + 1] >> 7) | (a_bytes[idx + 2] << 1)
+            t5 = (a_bytes[idx + 2] >> 4) | (a_bytes[idx + 3] << 4)
+            t6 = a_bytes[idx + 3] >> 1
+            t7 = (a_bytes[idx + 3] >> 6) | (a_bytes[idx + 4] << 2)
+            t8 = a_bytes[idx + 4] >> 3
             idx += 5
-            for j in 1:8
-                r[8i + j] = ((UInt32(t[j] & 0x1f) * UInt32(KYBER_Q) + 16) >> 5) % Int16
-            end
+            r[8i + 1] = ((UInt32(t1 & 0x1f) * UInt32(KYBER_Q) + 16) >> 5) % Int16
+            r[8i + 2] = ((UInt32(t2 & 0x1f) * UInt32(KYBER_Q) + 16) >> 5) % Int16
+            r[8i + 3] = ((UInt32(t3 & 0x1f) * UInt32(KYBER_Q) + 16) >> 5) % Int16
+            r[8i + 4] = ((UInt32(t4 & 0x1f) * UInt32(KYBER_Q) + 16) >> 5) % Int16
+            r[8i + 5] = ((UInt32(t5 & 0x1f) * UInt32(KYBER_Q) + 16) >> 5) % Int16
+            r[8i + 6] = ((UInt32(t6 & 0x1f) * UInt32(KYBER_Q) + 16) >> 5) % Int16
+            r[8i + 7] = ((UInt32(t7 & 0x1f) * UInt32(KYBER_Q) + 16) >> 5) % Int16
+            r[8i + 8] = ((UInt32(t8 & 0x1f) * UInt32(KYBER_Q) + 16) >> 5) % Int16
         end
     else
         error("kyber_poly_decompress!: unsupported d=$d (must be 4 or 5)")
