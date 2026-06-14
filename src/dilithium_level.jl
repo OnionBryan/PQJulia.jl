@@ -26,7 +26,7 @@ function use_hint(a::Int32, hint::Bool)::Int32
     end
 end
 
-function poly_uniform_eta!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
+function poly_uniform_eta!(a::AbstractVector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
     # SHAKE256(seed || nonce_le16) with re-squeeze loop (C ref: poly.c:435-453)
     # SHAKE256_RATE = 136; initial blocks: eta=2 → 1 block (136B), eta=4 → 2 blocks (272B)
     input = vcat(seed, UInt8[nonce & 0xff, (nonce >> 8) & 0xff])
@@ -82,13 +82,13 @@ function poly_uniform_eta!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
     return a
 end
 
-function poly_uniform_gamma1!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
+function poly_uniform_gamma1!(a::AbstractVector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
     buf = SHA.shake256(vcat(seed, UInt8[nonce & 0xff, (nonce >> 8) & 0xff]), UInt64(POLYZ_PACKED))
     polyz_unpack!(a, buf)
     return a
 end
 
-function poly_challenge!(c::Vector{Int32}, seed::Vector{UInt8})
+function poly_challenge!(c::AbstractVector{Int32}, seed::Vector{UInt8})
     # SampleInBall (C ref: poly.c:487-519). Uses incremental SHAKE256 squeeze.
     fill!(c, Int32(0))
     total_out = 136  # one SHAKE256 block
@@ -120,7 +120,7 @@ end
 
 # ==================== PACKING ====================
 
-function polyt1_pack(a::Vector{Int32})::Vector{UInt8}
+function polyt1_pack(a::AbstractVector{Int32})::Vector{UInt8}
     r = zeros(UInt8, POLYT1_PACKED)
     for i in 0:(N÷4 - 1)
         r[5i+1] = (a[4i+1]) % UInt8
@@ -132,7 +132,7 @@ function polyt1_pack(a::Vector{Int32})::Vector{UInt8}
     return r
 end
 
-function polyt1_unpack!(r::Vector{Int32}, a::Vector{UInt8})
+function polyt1_unpack!(r::AbstractVector{Int32}, a::Vector{UInt8})
     for i in 0:(N÷4 - 1)
         r[4i+1] = Int32((UInt32(a[5i+1]) | (UInt32(a[5i+2]) << 8)) & 0x3FF)
         r[4i+2] = Int32(((UInt32(a[5i+2]) >> 2) | (UInt32(a[5i+3]) << 6)) & 0x3FF)
@@ -142,7 +142,7 @@ function polyt1_unpack!(r::Vector{Int32}, a::Vector{UInt8})
     return r
 end
 
-function polyeta_pack(a::Vector{Int32})::Vector{UInt8}
+function polyeta_pack(a::AbstractVector{Int32})::Vector{UInt8}
     r = zeros(UInt8, POLYETA_PACKED)
     if ETA == 4
         for i in 0:(N÷2 - 1)
@@ -161,7 +161,7 @@ function polyeta_pack(a::Vector{Int32})::Vector{UInt8}
     return r
 end
 
-function polyeta_unpack!(r::Vector{Int32}, a::Vector{UInt8})
+function polyeta_unpack!(r::AbstractVector{Int32}, a::Vector{UInt8})
     if ETA == 4
         for i in 0:(N÷2 - 1)
             r[2i+1] = Int32(ETA) - Int32(a[i+1] & 0x0F)
@@ -185,7 +185,7 @@ function polyeta_unpack!(r::Vector{Int32}, a::Vector{UInt8})
     return r
 end
 
-function polyz_pack(a::Vector{Int32})::Vector{UInt8}
+function polyz_pack(a::AbstractVector{Int32})::Vector{UInt8}
     r = zeros(UInt8, POLYZ_PACKED)
     if GAMMA1 == Int32(1 << 19)
         # 20-bit packing: 2 coefficients -> 5 bytes
@@ -218,7 +218,7 @@ function polyz_pack(a::Vector{Int32})::Vector{UInt8}
     end
     return r
 end
-function polyz_unpack!(r::Vector{Int32}, a::Vector{UInt8})
+function polyz_unpack!(r::AbstractVector{Int32}, a::Vector{UInt8})
     if GAMMA1 == Int32(1 << 19)
         for i in 0:(N÷2 - 1)
             r[2i+1] = Int32(UInt32(a[5i+1]) | (UInt32(a[5i+2]) << 8) | (UInt32(a[5i+3]) << 16)) & Int32(0xFFFFF)
@@ -237,7 +237,7 @@ function polyz_unpack!(r::Vector{Int32}, a::Vector{UInt8})
     end
     return r
 end
-function polyw1_pack(a::Vector{Int32})::Vector{UInt8}
+function polyw1_pack(a::AbstractVector{Int32})::Vector{UInt8}
     r = zeros(UInt8, POLYW1_PACKED)
     if GAMMA2 == Int32(div(Q - 1, 32))
         # 4-bit: 2 coefficients per byte (w1 range 0..15)
@@ -254,7 +254,7 @@ function polyw1_pack(a::Vector{Int32})::Vector{UInt8}
     end
     return r
 end
-function polyt0_pack(a::Vector{Int32})::Vector{UInt8}
+function polyt0_pack(a::AbstractVector{Int32})::Vector{UInt8}
     # 13-bit packing: 8 coefficients → 13 bytes. C ref: packing.c:664-702
     r = zeros(UInt8, POLYT0_PACKED)
     for i in 0:(N÷8 - 1)
@@ -275,7 +275,7 @@ function polyt0_pack(a::Vector{Int32})::Vector{UInt8}
     end
     return r
 end
-function polyt0_unpack!(r::Vector{Int32}, a::Vector{UInt8})
+function polyt0_unpack!(r::AbstractVector{Int32}, a::Vector{UInt8})
     # 13-bit unpacking: 13 bytes → 8 coefficients. C ref: packing.c:712-763
     for i in 0:(N÷8 - 1)
         r[8i+1] = Int32(UInt32(a[13i+1]) | (UInt32(a[13i+2]) << 8)) & Int32(0x1FFF)
@@ -334,8 +334,10 @@ function dilithium_keygen_derand(xi::Vector{UInt8})
     end
 
     # power2round: t = t1*2^D + t0
-    t1 = [zeros(Int32, N) for _ in 1:K]
-    t0 = [zeros(Int32, N) for _ in 1:K]
+    t1_flat = zeros(Int32, N*K)
+    t0_flat = zeros(Int32, N*K)
+    t1 = [view(t1_flat, (i-1)*N+1:i*N) for i in 1:K]
+    t0 = [view(t0_flat, (i-1)*N+1:i*N) for i in 1:K]
     for i in 1:K
         for j in 1:N
             t1[i][j], t0[i][j] = power2round(t[i][j])
@@ -401,7 +403,7 @@ function sample_y!(y::Vector{Vector{Int32}}, rhoprime::Vector{UInt8}, nonce::Int
     end
 end
 
-function compute_w!(w1::Vector{Vector{Int32}}, w0::Vector{Vector{Int32}}, A::Matrix{Vector{Int32}}, y::Vector{Vector{Int32}}, tmp::Vector{Int32})
+function compute_w!(w1::Vector{Vector{Int32}}, w0::Vector{Vector{Int32}}, A::Matrix{Vector{Int32}}, y::Vector{Vector{Int32}}, tmp::AbstractVector{Int32})
     zy = [copy(y[i]) for i in 1:L]
     for i in 1:L; ntt!(zy[i]); end
     for i in 1:K
@@ -423,7 +425,7 @@ function compute_w!(w1::Vector{Vector{Int32}}, w0::Vector{Vector{Int32}}, A::Mat
     end
 end
 
-function compute_challenge(mu::Vector{UInt8}, w1::Vector{Vector{Int32}}, cp::Vector{Int32})
+function compute_challenge(mu::Vector{UInt8}, w1::Vector{Vector{Int32}}, cp::AbstractVector{Int32})
     w1_packed = UInt8[]
     for i in 1:K; append!(w1_packed, polyw1_pack(w1[i])); end
     c_tilde = SHA.shake256(vcat(mu, w1_packed), UInt64(CTILDEBYTES))
@@ -432,7 +434,7 @@ function compute_challenge(mu::Vector{UInt8}, w1::Vector{Vector{Int32}}, cp::Vec
     return c_tilde, cp_hat
 end
 
-function compute_z_and_check_norm!(z::Vector{Vector{Int32}}, cp_hat::Vector{Int32}, s1::Vector{Vector{Int32}}, y::Vector{Vector{Int32}})
+function compute_z_and_check_norm!(z::Vector{Vector{Int32}}, cp_hat::AbstractVector{Int32}, s1::Vector{Vector{Int32}}, y::Vector{Vector{Int32}})
     for i in 1:L
         poly_pointwise!(z[i], cp_hat, s1[i])
         invntt!(z[i])
@@ -448,7 +450,7 @@ function compute_z_and_check_norm!(z::Vector{Vector{Int32}}, cp_hat::Vector{Int3
     return false
 end
 
-function compute_w0_and_check_norm!(w0::Vector{Vector{Int32}}, cp_hat::Vector{Int32}, s2::Vector{Vector{Int32}}, tmp::Vector{Int32})
+function compute_w0_and_check_norm!(w0::Vector{Vector{Int32}}, cp_hat::AbstractVector{Int32}, s2::Vector{Vector{Int32}}, tmp::AbstractVector{Int32})
     for i in 1:K
         poly_pointwise!(tmp, cp_hat, s2[i])
         invntt!(tmp)
@@ -463,7 +465,7 @@ function compute_w0_and_check_norm!(w0::Vector{Vector{Int32}}, cp_hat::Vector{In
     return false
 end
 
-function make_hints_and_check!(h::Vector{Vector{Int32}}, w0::Vector{Vector{Int32}}, w1::Vector{Vector{Int32}}, cp_hat::Vector{Int32}, t0::Vector{Vector{Int32}})
+function make_hints_and_check!(h::Vector{Vector{Int32}}, w0::Vector{Vector{Int32}}, w1::Vector{Vector{Int32}}, cp_hat::AbstractVector{Int32}, t0::Vector{Vector{Int32}})
     # ct0
     for i in 1:K
         poly_pointwise!(h[i], cp_hat, t0[i])
@@ -583,7 +585,8 @@ function dilithium_verify(msg::Vector{UInt8}, sig::Vector{UInt8}, pk::Vector{UIn
 
     # Unpack pk
     rho = pk[1:SEEDBYTES]
-    t1 = [zeros(Int32, N) for _ in 1:K]
+    t1_flat = zeros(Int32, N*K)
+    t1 = [view(t1_flat, (i-1)*N+1:i*N) for i in 1:K]
     for i in 1:K
         polyt1_unpack!(t1[i], pk[SEEDBYTES + (i-1)*POLYT1_PACKED + 1 : SEEDBYTES + i*POLYT1_PACKED])
     end
@@ -855,7 +858,8 @@ function dilithium_verify_prehash(msg::Vector{UInt8}, sig::Vector{UInt8}, pk::Ve
     length(sig) != SIG_BYTES && return false
 
     rho = pk[1:SEEDBYTES]
-    t1 = [zeros(Int32, N) for _ in 1:K]
+    t1_flat = zeros(Int32, N*K)
+    t1 = [view(t1_flat, (i-1)*N+1:i*N) for i in 1:K]
     for i in 1:K; polyt1_unpack!(t1[i], pk[SEEDBYTES+(i-1)*POLYT1_PACKED+1:SEEDBYTES+i*POLYT1_PACKED]); end
 
     c_tilde = sig[1:CTILDEBYTES]
