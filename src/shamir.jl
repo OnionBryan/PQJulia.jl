@@ -37,13 +37,16 @@ function shamir_share(secret::Integer, k::Int, n::Int, p::Integer=PRIME_P)
         coeffs[k] = rand(Random.RandomDevice(), big(1):(p-1))
     end
 
+    p_big = BigInt(p)
+
     # Evaluate polynomial at x=1..n using Horner's method
     shares = Vector{Tuple{Int, BigInt}}(undef, n)
     for i in 1:n
-        x = big(i)
         fx = big(0)
         for j in k:-1:1
-            fx = mod(fx * x + coeffs[j], p)
+            Base.GMP.MPZ.mul_si!(fx, fx, Clong(i))
+            Base.GMP.MPZ.add!(fx, fx, coeffs[j])
+            Base.GMP.MPZ.fdiv_r!(fx, fx, p_big)
         end
         shares[i] = (i, fx)
     end
