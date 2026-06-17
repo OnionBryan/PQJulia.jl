@@ -35,6 +35,23 @@ function poly_uniform_eta!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
     buf = SHA.shake256(input, UInt64(total_out))
     buflen = total_out
 
+    @inline function decode_eta2!(a, idx, t)
+        if t < 15
+            t = t - ((205*t) >> 10)*5
+            a[idx] = Int32(2) - Int32(t)
+            return true
+        end
+        return false
+    end
+
+    @inline function decode_eta4!(a, idx, t)
+        if t < 9
+            a[idx] = Int32(4) - Int32(t)
+            return true
+        end
+        return false
+    end
+
     # Rejection sampling helper (inline, matches C rej_eta)
     function rej_pass(buf, buflen, a, offset, len)
         ctr = 0; pos = 1
@@ -43,25 +60,11 @@ function poly_uniform_eta!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
             t1 = UInt32(buf[pos]) >> 4
             pos += 1
             if ETA == 2
-                if t0 < 15
-                    t0 = t0 - ((205*t0) >> 10)*5
-                    a[offset + ctr + 1] = Int32(2) - Int32(t0)
-                    ctr += 1
-                end
-                if t1 < 15 && ctr < len
-                    t1 = t1 - ((205*t1) >> 10)*5
-                    a[offset + ctr + 1] = Int32(2) - Int32(t1)
-                    ctr += 1
-                end
+                decode_eta2!(a, offset + ctr + 1, t0) && (ctr += 1)
+                ctr < len && decode_eta2!(a, offset + ctr + 1, t1) && (ctr += 1)
             elseif ETA == 4
-                if t0 < 9
-                    a[offset + ctr + 1] = Int32(4) - Int32(t0)
-                    ctr += 1
-                end
-                if t1 < 9 && ctr < len
-                    a[offset + ctr + 1] = Int32(4) - Int32(t1)
-                    ctr += 1
-                end
+                decode_eta4!(a, offset + ctr + 1, t0) && (ctr += 1)
+                ctr < len && decode_eta4!(a, offset + ctr + 1, t1) && (ctr += 1)
             end
         end
         return ctr
