@@ -410,8 +410,8 @@ function kyber_poly_compress!(r_bytes::AbstractVector{UInt8}, a::Vector{Int16}, 
     if d == 4
         # 8 coefficients → 4 bytes (4 bits each, packed in pairs)
         idx = 1
+        t = Vector{UInt8}(undef, 8)
         for i in 0:(KYBER_N ÷ 8 - 1)
-            t = Vector{UInt8}(undef, 8)
             for j in 0:7
                 u = caddq(a[8i + j + 1])
                 # Optimized Barrett-style: (u << 4) + 1665, * 80635, >> 28
@@ -432,8 +432,8 @@ function kyber_poly_compress!(r_bytes::AbstractVector{UInt8}, a::Vector{Int16}, 
     elseif d == 5
         # 8 coefficients → 5 bytes (5 bits each)
         idx = 1
+        t = Vector{UInt8}(undef, 8)
         for i in 0:(KYBER_N ÷ 8 - 1)
-            t = Vector{UInt8}(undef, 8)
             for j in 0:7
                 u = caddq(a[8i + j + 1])
                 # Use `% UInt32` to match C's silent int16_t → uint32_t conversion
@@ -474,8 +474,8 @@ function kyber_poly_decompress!(r::Vector{Int16}, a_bytes::AbstractVector{UInt8}
     elseif d == 5
         # 5 bytes → 8 coefficients
         idx = 1
+        t = Vector{UInt8}(undef, 8)
         for i in 0:(KYBER_N ÷ 8 - 1)
-            t = Vector{UInt8}(undef, 8)
             t[1] = a_bytes[idx]
             t[2] = (a_bytes[idx] >> 5) | (a_bytes[idx + 1] << 3)
             t[3] = a_bytes[idx + 1] >> 2
