@@ -91,12 +91,11 @@ function kyber_polyvec_compress!(r::AbstractVector{UInt8},
         # d=10: 4 coefficients → 5 bytes (ML-KEM-512, ML-KEM-768)
         for i in 1:k
             for j in 0:(KYBER_N ÷ 4 - 1)
-                t = Vector{UInt16}(undef, 4)
-                for m in 0:3
-                    u = caddq(a[i][4j + m + 1])
+                t = ntuple(4) do m
+                    u = caddq(a[i][4j + m])
                     d0 = UInt64(u % UInt16)
                     d0 <<= 10; d0 += 1665; d0 *= 1290167; d0 >>= 32
-                    t[m + 1] = UInt16(d0 & 0x3ff)
+                    UInt16(d0 & 0x3ff)
                 end
                 r[idx]     = (t[1]) % UInt8
                 r[idx + 1] = ((t[1] >> 8) | (t[2] << 2)) % UInt8
@@ -110,12 +109,11 @@ function kyber_polyvec_compress!(r::AbstractVector{UInt8},
         # d=11: 8 coefficients → 11 bytes (ML-KEM-1024)
         for i in 1:k
             for j in 0:(KYBER_N ÷ 8 - 1)
-                t = Vector{UInt16}(undef, 8)
-                for m in 0:7
-                    u = caddq(a[i][8j + m + 1])
+                t = ntuple(8) do m
+                    u = caddq(a[i][8j + m])
                     d0 = UInt64(u % UInt16)
                     d0 <<= 11; d0 += 1664; d0 *= 645084; d0 >>= 31
-                    t[m + 1] = UInt16(d0 & 0x7ff)
+                    UInt16(d0 & 0x7ff)
                 end
                 r[idx]      = (t[1]) % UInt8
                 r[idx + 1]  = ((t[1] >> 8) | (t[2] << 3)) % UInt8
@@ -158,15 +156,16 @@ function kyber_polyvec_decompress!(r::Vector{Vector{Int16}},
         # d=11: 11 bytes → 8 coefficients
         for i in 1:k
             for j in 0:(KYBER_N ÷ 8 - 1)
-                t = Vector{UInt16}(undef, 8)
-                t[1] = (UInt16(a[idx]) | (UInt16(a[idx+1]) << 8)) & 0x7ff
-                t[2] = ((UInt16(a[idx+1]) >> 3) | (UInt16(a[idx+2]) << 5)) & 0x7ff
-                t[3] = ((UInt16(a[idx+2]) >> 6) | (UInt16(a[idx+3]) << 2) | (UInt16(a[idx+4]) << 10)) & 0x7ff
-                t[4] = ((UInt16(a[idx+4]) >> 1) | (UInt16(a[idx+5]) << 7)) & 0x7ff
-                t[5] = ((UInt16(a[idx+5]) >> 4) | (UInt16(a[idx+6]) << 4)) & 0x7ff
-                t[6] = ((UInt16(a[idx+6]) >> 7) | (UInt16(a[idx+7]) << 1) | (UInt16(a[idx+8]) << 9)) & 0x7ff
-                t[7] = ((UInt16(a[idx+8]) >> 2) | (UInt16(a[idx+9]) << 6)) & 0x7ff
-                t[8] = ((UInt16(a[idx+9]) >> 5) | (UInt16(a[idx+10]) << 3)) & 0x7ff
+                t = (
+                    (UInt16(a[idx]) | (UInt16(a[idx+1]) << 8)) & 0x7ff,
+                    ((UInt16(a[idx+1]) >> 3) | (UInt16(a[idx+2]) << 5)) & 0x7ff,
+                    ((UInt16(a[idx+2]) >> 6) | (UInt16(a[idx+3]) << 2) | (UInt16(a[idx+4]) << 10)) & 0x7ff,
+                    ((UInt16(a[idx+4]) >> 1) | (UInt16(a[idx+5]) << 7)) & 0x7ff,
+                    ((UInt16(a[idx+5]) >> 4) | (UInt16(a[idx+6]) << 4)) & 0x7ff,
+                    ((UInt16(a[idx+6]) >> 7) | (UInt16(a[idx+7]) << 1) | (UInt16(a[idx+8]) << 9)) & 0x7ff,
+                    ((UInt16(a[idx+8]) >> 2) | (UInt16(a[idx+9]) << 6)) & 0x7ff,
+                    ((UInt16(a[idx+9]) >> 5) | (UInt16(a[idx+10]) << 3)) & 0x7ff
+                )
                 for m in 1:8
                     r[i][8j+m] = kyber_decompress(t[m], 11)
                 end
