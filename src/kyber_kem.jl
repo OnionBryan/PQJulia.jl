@@ -60,6 +60,20 @@ function kyber_polyvec_basemul_acc!(r::Vector{Int16},
     return r
 end
 
+function kyber_polyvec_basemul_acc!(r::Vector{Int16},
+                                    a::AbstractMatrix{Int16},
+                                    b::Vector{Vector{Int16}},
+                                    k::Int)
+    kyber_poly_basemul_montgomery!(r, view(a, :, 1), b[1])
+    tmp = zeros(Int16, KYBER_N)
+    for i in 2:k
+        kyber_poly_basemul_montgomery!(tmp, view(a, :, i), b[i])
+        kyber_poly_add!(r, r, tmp)
+    end
+    kyber_poly_reduce!(r)
+    return r
+end
+
 # ── Polyvec Add / Reduce ────────────────────────────────────────────────────
 
 function kyber_polyvec_add!(r::Vector{Vector{Int16}},
@@ -178,13 +192,13 @@ function kyber_polyvec_decompress!(r::Vector{Vector{Int16}},
 end
 
 function kyber_gen_matrix(seed::Vector{UInt8}, transposed::Bool, k::Int)
-    a = [[zeros(Int16, KYBER_N) for _ in 1:k] for _ in 1:k]
+    a = zeros(Int16, KYBER_N, k, k)
     for i in 0:(k - 1)
         for j in 0:(k - 1)
             if transposed
-                kyber_sample_uniform!(a[i+1][j+1], seed, UInt8(i), UInt8(j))
+                kyber_sample_uniform!(view(a, :, j+1, i+1), seed, UInt8(i), UInt8(j))
             else
-                kyber_sample_uniform!(a[i+1][j+1], seed, UInt8(j), UInt8(i))
+                kyber_sample_uniform!(view(a, :, j+1, i+1), seed, UInt8(j), UInt8(i))
             end
         end
     end
@@ -270,7 +284,7 @@ function kyber_indcpa_keypair_derand(coins::Vector{UInt8})
     # t = A * s (in NTT domain), with tomont after basemul
     pkpv = [zeros(Int16, KYBER_N) for _ in 1:k]
     for i in 1:k
-        kyber_polyvec_basemul_acc!(pkpv[i], a[i], skpv, k)
+        kyber_polyvec_basemul_acc!(pkpv[i], view(a, :, :, i), skpv, k)
         kyber_poly_tomont!(pkpv[i])
     end
 
@@ -328,7 +342,7 @@ function kyber_indcpa_enc(m::Vector{UInt8}, pk::Vector{UInt8}, coins::Vector{UIn
     # b = A^T * r  (in NTT domain)
     b = [zeros(Int16, KYBER_N) for _ in 1:k]
     for i in 1:k
-        kyber_polyvec_basemul_acc!(b[i], at[i], sp, k)
+        kyber_polyvec_basemul_acc!(b[i], view(at, :, :, i), sp, k)
     end
 
     # v = t^T * r  (inner product in NTT domain)

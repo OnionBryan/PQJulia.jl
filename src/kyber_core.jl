@@ -246,7 +246,7 @@ end
 Rejection-sample uniform coefficients mod q from random bytes.
 Returns the number of valid coefficients produced.
 """
-function kyber_rej_uniform!(r::Vector{Int16}, buf::Vector{UInt8})
+function kyber_rej_uniform!(r::AbstractVector{Int16}, buf::Vector{UInt8})
     len = length(r)
     buflen = length(buf)
     ctr = 0
@@ -273,7 +273,7 @@ end
 Sample a full polynomial (256 coeffs) uniformly mod q using SHAKE-128
 seeded with seed||i||j.  Uses rejection sampling.
 """
-function kyber_sample_uniform!(r::Vector{Int16}, seed::Vector{UInt8},
+function kyber_sample_uniform!(r::AbstractVector{Int16}, seed::Vector{UInt8},
                                i::UInt8, j::UInt8)
     # SHAKE-128 rejection sampling with re-squeeze (C ref: indcpa.c:gen_matrix)
     # SHAKE128_RATE = 168; initial buffer = 4 blocks = 672 bytes
@@ -348,7 +348,7 @@ with alternating +/- zetas from KYBER_ZETAS[65:128].
 Mirrors poly.c:poly_basemul_montgomery.
 """
 function kyber_poly_basemul_montgomery!(r::Vector{Int16},
-                                        a::Vector{Int16},
+                                        a::AbstractVector{Int16},
                                         b::Vector{Int16})
     # C: for(i=0;i<N/4;i++) {
     #   basemul(&r[4i], &a[4i], &b[4i], zetas[64+i]);
