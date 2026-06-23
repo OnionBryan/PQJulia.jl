@@ -319,26 +319,25 @@ function dilithium_keygen_derand(xi::Vector{UInt8})
     s1hat = [copy(s) for s in s1]
     for i in 1:L; ntt!(s1hat[i]); end
 
-    t = [zeros(Int32, N) for _ in 1:K]
+    t = zeros(Int32, N)
     tmp = zeros(Int32, N)
-    for i in 1:K
-        fill!(t[i], Int32(0))
-        for j in 1:L
-            poly_pointwise!(tmp, A[i,j], s1hat[j])
-            poly_add!(t[i], t[i], tmp)
-        end
-        poly_reduce!(t[i])
-        invntt!(t[i])
-        poly_add!(t[i], t[i], s2[i])
-        poly_caddq!(t[i])
-    end
-
-    # power2round: t = t1*2^D + t0
     t1 = [zeros(Int32, N) for _ in 1:K]
     t0 = [zeros(Int32, N) for _ in 1:K]
+
     for i in 1:K
+        fill!(t, Int32(0))
+        for j in 1:L
+            poly_pointwise!(tmp, A[i,j], s1hat[j])
+            poly_add!(t, t, tmp)
+        end
+        poly_reduce!(t)
+        invntt!(t)
+        poly_add!(t, t, s2[i])
+        poly_caddq!(t)
+
+        # power2round: t = t1*2^D + t0
         for j in 1:N
-            t1[i][j], t0[i][j] = power2round(t[i][j])
+            t1[i][j], t0[i][j] = power2round(t[j])
         end
     end
 
