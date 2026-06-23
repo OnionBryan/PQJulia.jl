@@ -19,7 +19,8 @@ function mod_inverse(a::Integer, m::Integer)::Integer
     return mod(old_s, m)
 end
 
-function shamir_share(secret::Integer, k::Int, n::Int, p::Integer=PRIME_P)
+function shamir_share(secret::Integer, k::Int, n::Int)
+    p = PRIME_P
     k < 1 && throw(ArgumentError("Threshold k must be >= 1, got $k"))
     n < 1 && throw(ArgumentError("Number of shares n must be >= 1, got $n"))
     k > n && throw(ArgumentError("Threshold k=$k exceeds number of shares n=$n"))
@@ -50,7 +51,8 @@ function shamir_share(secret::Integer, k::Int, n::Int, p::Integer=PRIME_P)
     return shares
 end
 
-function shamir_reconstruct(shares::Vector{Tuple{Int, T}}, k::Int, p::Integer=PRIME_P) where T <: Integer
+function shamir_reconstruct(shares::Vector{Tuple{Int, T}}, k::Int) where T <: Integer
+    p = PRIME_P
     length(shares) < k && throw(ArgumentError("Need >= $k shares, got $(length(shares))"))
 
     subset = shares[1:k]
@@ -83,9 +85,9 @@ end
 Split raw bytes into Shamir shares. Convenience wrapper that handles
 BigInt encoding/decoding for byte-oriented secret material (keys, hashes).
 """
-function shamir_share_bytes(secret_bytes::Vector{UInt8}, k::Int, n::Int, p::Integer=PRIME_P)
+function shamir_share_bytes(secret_bytes::Vector{UInt8}, k::Int, n::Int)
     secret_int = parse(BigInt, bytes2hex(secret_bytes), base=16)
-    return shamir_share(secret_int, k, n, p)
+    return shamir_share(secret_int, k, n)
 end
 
 """
@@ -94,8 +96,8 @@ end
 Reconstruct raw bytes from Shamir shares. `nbytes` is the expected output
 length (e.g., 32 for a 256-bit key).
 """
-function shamir_reconstruct_bytes(shares::Vector{Tuple{Int, T}}, k::Int, nbytes::Int, p::Integer=PRIME_P) where T <: Integer
-    secret_int = shamir_reconstruct(shares, k, p)
+function shamir_reconstruct_bytes(shares::Vector{Tuple{Int, T}}, k::Int, nbytes::Int) where T <: Integer
+    secret_int = shamir_reconstruct(shares, k)
     hex = string(secret_int, base=16)
     # Pad to expected length
     hex = lpad(hex, 2 * nbytes, '0')
