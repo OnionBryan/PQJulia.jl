@@ -631,18 +631,15 @@ function dilithium_verify(msg::Vector{UInt8}, sig::Vector{UInt8}, pk::Vector{UIn
     cp = zeros(Int32, N)
     poly_challenge!(cp, c_tilde)
 
-    A = [zeros(Int32, N) for _ in 1:K, _ in 1:L]
-    for i in 1:K, j in 1:L
-        poly_uniform!(A[i,j], rho, UInt16((i-1) << 8 | (j-1)))
-    end
-
     for i in 1:L; ntt!(z[i]); end
     w1p = [zeros(Int32, N) for _ in 1:K]
     tmp = zeros(Int32, N)
+    A_ij = zeros(Int32, N)
     for i in 1:K
         fill!(w1p[i], Int32(0))
         for j in 1:L
-            poly_pointwise!(tmp, A[i,j], z[j])
+            poly_uniform!(A_ij, rho, UInt16((i-1) << 8 | (j-1)))
+            poly_pointwise!(tmp, A_ij, z[j])
             poly_add!(w1p[i], w1p[i], tmp)
         end
     end
@@ -888,15 +885,14 @@ function dilithium_verify_prehash(msg::Vector{UInt8}, sig::Vector{UInt8}, pk::Ve
     mu = SHA.shake256(vcat(tr, pre), UInt64(CRHBYTES))
 
     cp = zeros(Int32, N); poly_challenge!(cp, c_tilde)
-    A = [zeros(Int32, N) for _ in 1:K, _ in 1:L]
-    for i in 1:K, j in 1:L; poly_uniform!(A[i,j], rho, UInt16((i-1) << 8 | (j-1))); end
 
     for i in 1:L; ntt!(z[i]); end
     w1p = [zeros(Int32, N) for _ in 1:K]
     tmp = zeros(Int32, N)
+    A_ij = zeros(Int32, N)
     for i in 1:K
         fill!(w1p[i], Int32(0))
-        for j in 1:L; poly_pointwise!(tmp, A[i,j], z[j]); poly_add!(w1p[i], w1p[i], tmp); end
+        for j in 1:L; poly_uniform!(A_ij, rho, UInt16((i-1) << 8 | (j-1))); poly_pointwise!(tmp, A_ij, z[j]); poly_add!(w1p[i], w1p[i], tmp); end
     end
 
     ntt!(cp)
