@@ -127,7 +127,7 @@ println("=" ^ 70)
             secret = parse(BigInt, bytes2hex(rand(UInt8, 32)), base=16)
             shares = shamir_share(secret, 3, 5)
             wrong = shamir_reconstruct([shares[1], shares[2]], 2)
-            @test wrong != secret  # must ALWAYS differ — any match is a catastrophic bug
+            @test wrong != secret  # must ALWAYS differ — any match is a catastrophic failure
         end
     end
 end
