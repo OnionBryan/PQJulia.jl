@@ -1,2 +1,6 @@
 Manifest.toml
 *.bin
+.DS_Store
+native/*.dylib
+native/*.o
+native/test_galerkin_k2
