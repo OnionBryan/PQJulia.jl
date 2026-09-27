@@ -159,6 +159,58 @@ end
     end
 end
 
+# ==================== Homological Analysis ====================
+
+include("homological_shamir_test.jl")
+
+# ==================== Research Bridging Experiments ====================
+
+include("thesis_a_lll_torsion.jl")
+include("thesis_b_hodge_laplacian.jl")
+include("thesis_b_hodge_laplacian_nd.jl")
+include("thesis_c_tqft_torsion.jl")
+include("thesis_c_kitaev_defects.jl")
+
+@testset "Thesis A: LLL Torsion Profile Hardness" begin
+    # We run the experiment and assert that it completes without errors
+    @test_nowarn run_thesis_a_experiment()
+end
+
+# Thesis B/B(n-D)/C(Kitaev) run on the native DEC bridge (native/build_shim.sh, needs the
+# Forged-lab native tree); where it is not built they are reported as skipped, not run.
+if ForgedDEC.isavailable()
+    @testset "Thesis B: Hodge Laplacian Spectral Security" begin
+        # We run the experiment and assert that it completes without errors
+        @test_nowarn run_thesis_b_experiment()
+    end
+
+    @testset "Thesis B (n-D): N-Dimensional Hodge Laplacian" begin
+        # We run the experiment and assert that it completes without errors
+        @test_nowarn run_thesis_b_nd_experiment()
+    end
+else
+    @info "Thesis B, B (n-D), C (Kitaev): native/libforgeddec not built — skipped"
+    @testset "Thesis B/B(n-D) (native DEC bridge)" begin
+        @test_skip false
+    end
+end
+
+@testset "Thesis C: Digraph Asymmetry & Reidemeister Torsion Chirality" begin
+    # We run the experiment and assert that it completes without errors
+    @test_nowarn run_thesis_c_experiment()
+end
+
+if ForgedDEC.isavailable()
+    @testset "Thesis C (Kitaev): Kitaev Defect Chirality & Hodge Strain" begin
+        # We run the experiment and assert that it completes without errors
+        @test_nowarn run_thesis_c_kitaev_experiment()
+    end
+else
+    @testset "Thesis C (Kitaev) (native DEC bridge)" begin
+        @test_skip false
+    end
+end
+
 println("\n" * "=" ^ 70)
 println("  All PQJulia.jl tests complete!")
 println("=" ^ 70)
