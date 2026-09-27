@@ -4,10 +4,13 @@
 Implementations of NIST FIPS post-quantum cryptographic standards:
 - **ML-KEM** (FIPS 203): Module-Lattice Key Encapsulation (Kyber) — 512/768/1024
 - **ML-DSA** (FIPS 204): Module-Lattice Digital Signatures (Dilithium) — 44/65/87
-- **Shamir**: (k,n)-threshold secret sharing over GF(2^127-1)
+- **FN-DSA** (Falcon): NTRU-lattice signatures — Falcon-512 / Falcon-1024; exact key certificate,
+  float-free keygen, message recovery (FALCON-MRM)
+- **X25519** (RFC 7748) and **X-Wing** (X25519 + ML-KEM-768 hybrid KEM)
+- **Shamir**: (k,n)-threshold secret sharing over GF(2^521-1)
 
-All ML-KEM and ML-DSA implementations pass 677 NIST ACVP Known Answer Tests.
-ML-KEM is C cross-validated (byte-exact with pq-crystals/kyber reference).
+ML-KEM and ML-DSA pass 855 NIST ACVP vectors across every interface; Falcon signing is
+byte-exact with the round-3 C reference implementation.
 
 ## Quick Start
 
@@ -25,6 +28,11 @@ pk, sk = MLDSA.Category3.dilithium_keygen()
 msg = Vector{UInt8}("hello")
 sig = MLDSA.Category3.dilithium_sign(msg, sk)
 MLDSA.Category3.dilithium_verify(msg, sig, pk)  # true
+
+# Falcon-512 Signatures
+pk, sk = FNDSA.Falcon512.falcon_keygen()
+sig = FNDSA.Falcon512.falcon_sign(msg, sk)
+FNDSA.Falcon512.falcon_verify(msg, sig, pk)  # true
 ```
 """
 module PQJulia
@@ -37,8 +45,18 @@ using .MLKEM
 include("mldsa.jl")
 using .MLDSA
 
+# FN-DSA (Falcon) — NTRU-lattice hash-and-sign signatures
+include("fndsa.jl")
+using .FNDSA
+
+# X25519 (RFC 7748) and the X-Wing hybrid KEM (X25519 + ML-KEM-768)
+include("x25519.jl")
+using .X25519
+include("xwing.jl")
+using .XWing
+
 # Re-export modules
-export MLKEM, MLDSA
+export MLKEM, MLDSA, FNDSA, X25519, XWing
 
 # Shamir Secret Sharing
 include("shamir.jl")

@@ -5,9 +5,6 @@ PQJulia.jl Property-Based Tests
 Random-input tests that verify structural properties hold beyond KAT vectors.
 """
 
-using Pkg
-Pkg.activate(joinpath(@__DIR__, ".."))
-
 using PQJulia
 using Test
 using Random
@@ -204,7 +201,7 @@ println("=" ^ 70)
         @test !MLDSA.Category3.dilithium_verify(msg, UInt8[], pk)
     end
 
-    # ─── ML-DSA: Overlong context → must error ───────────────────
+    # ─── ML-DSA: Overlong context → sign errors, verify rejects (FIPS 204 Alg. 3) ─
     @testset "ML-DSA context length validation" begin
         pk, sk = MLDSA.Category3.dilithium_keygen()
         msg = Vector{UInt8}("test")
@@ -212,7 +209,7 @@ println("=" ^ 70)
 
         @test_throws ErrorException MLDSA.Category3.dilithium_sign(msg, sk; context=long_ctx)
         sig = MLDSA.Category3.dilithium_sign(msg, sk)
-        @test_throws ErrorException MLDSA.Category3.dilithium_verify(msg, sig, pk; context=long_ctx)
+        @test !MLDSA.Category3.dilithium_verify(msg, sig, pk; context=long_ctx)
 
         # 255 bytes should be fine
         ok_ctx = rand(UInt8, 255)
@@ -301,8 +298,8 @@ println("=" ^ 70)
             @testset "ML-DSA-$name" begin
                 pk, sk = Cat.dilithium_keygen()
                 msg = rand(UInt8, 64)
-                sig1 = Cat.dilithium_sign(msg, sk)  # hedged=false default
-                sig2 = Cat.dilithium_sign(msg, sk)
+                sig1 = Cat.dilithium_sign(msg, sk; hedged=false)
+                sig2 = Cat.dilithium_sign(msg, sk; hedged=false)
                 @test sig1 == sig2
             end
         end

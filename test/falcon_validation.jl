@@ -4,13 +4,10 @@
    Gaussian moments, the NTRU equation, encode round-trip, the native NEON NTT,
    and end-to-end keygen→sign→verify with the spec norm bound). Run:
        julia test/falcon_validation.jl =#
-using Statistics, Printf
-const SRC = joinpath(@__DIR__, "..", "src", "falcon")
-include(joinpath(SRC, "falcon_fft.jl"));      using .FalconFFT
-include(joinpath(SRC, "falcon_sampler.jl"));  using .FalconSampler
-include(joinpath(SRC, "falcon_encoding.jl")); using .FalconEncoding
-include(joinpath(SRC, "falcon_neon.jl"));     using .FalconNEON
-include(joinpath(SRC, "falcon.jl"));          using .Falcon
+using Statistics, Printf, PQJulia
+const FalconFFT = PQJulia.FNDSA.FalconFFT; const FalconSampler = PQJulia.FNDSA.FalconSampler
+const FalconEncoding = PQJulia.FNDSA.FalconEncoding; const Falcon = PQJulia.FNDSA.Falcon
+include(joinpath(@__DIR__, "..", "research", "falcon_neon.jl")); using .FalconNEON
 const FF = FalconFFT; const NE = FalconNEON
 
 pass = 0; fail = 0
@@ -20,20 +17,6 @@ println("── FFT / NTT core (vs schoolbook negacyclic multiply) ──")
 chk(FalconFFT.validate(verbose=false), "fft/ntt: ifft∘fft=id, mul_fft=neg-cyclic, split/merge, NTT mod q")
 let a = rand(0:FF.q-1,256), b = rand(0:FF.q-1,256)
     chk(FF.ntt_mul_fast(a,b) == mod.(FF.negacyclic_mul(a,b), FF.q), "fast O(n log n) NTT = reference")
-end
-
-println("── SamplerZ bit-exact vs reference KAT (if reference checkout present) ──")
-let katf = "/tmp/falconref/scripts/samplerz_KAT512.py"
-    if isfile(katf)
-        txt = read(katf, String); p = 0; f = 0
-        for m in eachmatch(r"'mu':\s*(-?[\d.]+),\s*'sigma':\s*([\d.]+),\s*'sigmin':\s*([\d.]+),\s*'octets':\s*'([0-9A-Fa-f]+)',\s*'z':\s*(-?\d+)", txt)
-            z = FalconSampler.samplerz(parse(Float64,m[1]),parse(Float64,m[2]),parse(Float64,m[3]),FalconSampler.KATSource(String(m[4])))
-            z == parse(Int,m[5]) ? (p+=1) : (f+=1)
-        end
-        chk(f == 0 && p > 100, "samplerz bit-exact: $p/$(p+f) reference KAT vectors")
-    else
-        println("  skip  (reference KAT not checked out at $katf)")
-    end
 end
 
 println("── SamplerZ (target Gaussian moments) ──")
@@ -63,8 +46,11 @@ let s = round.(Int, 60 .* randn(512))
 end
 
 println("── Native NEON NTT (C/NEON) = reference ──")
-let a = rand(0:FF.q-1,512), b = rand(0:FF.q-1,512)
-    chk(NE.isavailable() && NE.neon_negamul(a,b) == mod.(FF.negacyclic_mul(a,b), FF.q),
+if !NE.isavailable()
+    println("  skip  (native/libforgeddec not built)")
+else
+    a = rand(0:FF.q-1,512); b = rand(0:FF.q-1,512)
+    chk(NE.neon_negamul(a,b) == mod.(FF.negacyclic_mul(a,b), FF.q),
         "NEON NTT negamul = reference (n=512)")
 end
 

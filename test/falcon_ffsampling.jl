@@ -4,9 +4,9 @@
    reject forgeries, and match the Klein/GPV norm distribution; n=512 timing. Run:
        julia test/falcon_ffsampling.jl =#
 using Statistics, Printf
-include(joinpath(@__DIR__, "..", "src", "falcon", "falcon.jl")); using .Falcon
-const F = Falcon
-import .FalconNTRUGen as NG
+using PQJulia
+const F = PQJulia.FNDSA.Falcon
+const NG = PQJulia.FNDSA.FalconNTRUGen
 
 pass = 0; fail = 0
 chk(c, m) = (global pass, fail; c ? (pass += 1; println("  ok   ", m)) : (fail += 1; println("  FAIL ", m)))

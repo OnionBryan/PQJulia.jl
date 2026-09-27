@@ -293,6 +293,7 @@ end
 # ==================== KEY GENERATION ====================
 
 function dilithium_keygen_derand(xi::Vector{UInt8})
+    length(xi) == SEEDBYTES || throw(ArgumentError("keygen seed must be $SEEDBYTES bytes"))
     seed = xi[1:SEEDBYTES]
     expanded = SHA.shake256(vcat(seed, UInt8[K, L]), UInt64(2*SEEDBYTES + CRHBYTES))
     rho = expanded[1:SEEDBYTES]
@@ -361,7 +362,7 @@ function dilithium_keygen_derand(xi::Vector{UInt8})
 end
 
 function dilithium_keygen()
-    return dilithium_keygen_derand(rand(UInt8, SEEDBYTES))
+    return dilithium_keygen_derand(rand(RandomDevice(), UInt8, SEEDBYTES))
 end
 
 # ==================== SIGN ====================
@@ -511,23 +512,25 @@ function pack_signature(c_tilde::Vector{UInt8}, z::Vector{Vector{Int32}}, h::Vec
     return sig
 end
 
-function dilithium_sign_derand(msg::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8}; context::Vector{UInt8}=UInt8[])
-    length(context) > 255 && error("Context string must be ≤ 255 bytes (FIPS 204 §5.2)")
+"""ML-DSA.Sign_internal core (FIPS 204 Alg. 7) from μ = H(tr ‖ M′). Every signing entry point lands here."""
+function sign_mu(mu::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8})
+    length(mu) == CRHBYTES || error("mu must be $CRHBYTES bytes")
+    length(rnd) == 32 || error("rnd must be 32 bytes")
+    length(sk) == SK_BYTES || error("$IDENTIFIER secret key must be $SK_BYTES bytes")
 
     rho, key, tr, s1, s2, t0 = unpack_sk(sk)
-
+    # skDecode range check: s1, s2 coefficients must lie in [-η, η] (Wycheproof InvalidPrivateKey)
+    all(v -> all(x -> -ETA <= x <= ETA, v), s1) && all(v -> all(x -> -ETA <= x <= ETA, v), s2) ||
+        throw(ArgumentError("$IDENTIFIER secret key has s1/s2 coefficients outside [-η, η]"))
     A = expand_A(rho)
     for i in 1:L; ntt!(s1[i]); end
     for i in 1:K; ntt!(s2[i]); end
     for i in 1:K; ntt!(t0[i]); end
 
-    pre = vcat(UInt8[0x00, UInt8(length(context))], context)
-    mu = SHA.shake256(vcat(tr, pre, msg), UInt64(CRHBYTES))
-    rhoprime = SHA.shake256(vcat(key, rnd[1:32], mu), UInt64(CRHBYTES))
+    rhoprime = SHA.shake256(vcat(key, rnd, mu), UInt64(CRHBYTES))
 
-    nonce = 0
+    nonce = 0  # Int, not UInt16 — avoids overflow at 9362 iterations for L=7 (pq-crystals/dilithium#110)
     y = [zeros(Int32, N) for _ in 1:L]
-    zy = [zeros(Int32, N) for _ in 1:L]
     z = [zeros(Int32, N) for _ in 1:L]
     w1 = [zeros(Int32, N) for _ in 1:K]
     w0 = [zeros(Int32, N) for _ in 1:K]
@@ -537,49 +540,59 @@ function dilithium_sign_derand(msg::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vecto
 
     while true
         sample_y!(y, rhoprime, nonce)
-        compute_w!(w1, w0, A, y, tmp)
-
+        compute_w!(w1, w0, A, y, tmp)                  # w1 = HighBits(Ay), w0 = LowBits(Ay)
         c_tilde, cp_hat = compute_challenge(mu, w1, cp)
-        # w = Ay (in NTT domain)
-        for i in 1:L; copyto!(zy[i], y[i]); end
-        for i in 1:L; ntt!(zy[i]); end
-        for i in 1:K
-            fill!(w1[i], Int32(0))
-            for j in 1:L
-                poly_pointwise!(tmp, A[i,j], zy[j])
-                poly_add!(w1[i], w1[i], tmp)
-            end
-            poly_reduce!(w1[i])
-            invntt!(w1[i])
-            poly_caddq!(w1[i])
-        end
-
         if compute_z_and_check_norm!(z, cp_hat, s1, y)
             nonce += 1; continue
         end
-
         if compute_w0_and_check_norm!(w0, cp_hat, s2, tmp)
             nonce += 1; continue
         end
-
         if make_hints_and_check!(h, w0, w1, cp_hat, t0)
             nonce += 1; continue
         end
-
         return pack_signature(c_tilde, z, h)
     end
 end
 
-function dilithium_sign(msg::Vector{UInt8}, sk::Vector{UInt8}; hedged::Bool=false, context::Vector{UInt8}=UInt8[])
-    rnd = hedged ? rand(UInt8, 32) : zeros(UInt8, 32)
+sk_tr(sk::Vector{UInt8}) = sk[2*SEEDBYTES+1:2*SEEDBYTES+TRBYTES]
+mu_of(tr::Vector{UInt8}, mprime::Vector{UInt8}) = SHA.shake256(vcat(tr, mprime), UInt64(CRHBYTES))
+
+# M′ for pure ML-DSA (FIPS 204 Alg. 2/3): 0x00 ‖ |ctx| ‖ ctx ‖ M.
+pure_mprime(msg, context) = vcat(UInt8[0x00, UInt8(length(context))], context, msg)
+
+"""ML-DSA.Sign_internal (FIPS 204 Alg. 7): signs the formatted message M′ as given, no domain separator."""
+function dilithium_sign_internal(mprime::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8})
+    length(sk) == SK_BYTES || error("$IDENTIFIER secret key must be $SK_BYTES bytes")
+    return sign_mu(mu_of(sk_tr(sk), mprime), sk, rnd)
+end
+
+"""Sign with explicit μ (FIPS 204 external-μ interface)."""
+dilithium_sign_internal_mu(mu::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8}) = sign_mu(mu, sk, rnd)
+
+"""Alias of `dilithium_sign_internal`."""
+dilithium_sign_internal_msg(mprime::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8}) =
+    dilithium_sign_internal(mprime, sk, rnd)
+
+"""ML-DSA.Sign (FIPS 204 Alg. 2) with caller-supplied 32-byte `rnd` (all zeros = deterministic variant)."""
+function dilithium_sign_derand(msg::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8}; context::Vector{UInt8}=UInt8[])
+    length(context) > 255 && error("Context string must be ≤ 255 bytes (FIPS 204 §5.2)")
+    return dilithium_sign_internal(pure_mprime(msg, context), sk, rnd)
+end
+
+"""ML-DSA.Sign (FIPS 204 Alg. 2). Hedged by default (rnd from the OS CSPRNG); `hedged=false` is the deterministic variant."""
+function dilithium_sign(msg::Vector{UInt8}, sk::Vector{UInt8}; hedged::Bool=true, context::Vector{UInt8}=UInt8[])
+    rnd = hedged ? rand(RandomDevice(), UInt8, 32) : zeros(UInt8, 32)
     return dilithium_sign_derand(msg, sk, rnd; context=context)
 end
 
 # ==================== VERIFY ====================
 
-function dilithium_verify(msg::Vector{UInt8}, sig::Vector{UInt8}, pk::Vector{UInt8}; context::Vector{UInt8}=UInt8[])
-    length(context) > 255 && error("Context string must be ≤ 255 bytes (FIPS 204 §5.2)")
+"""ML-DSA.Verify_internal core (FIPS 204 Alg. 8) from μ."""
+function dilithium_verify_mu(mu::Vector{UInt8}, sig::Vector{UInt8}, pk::Vector{UInt8})
+    length(mu) != CRHBYTES && return false
     length(sig) != SIG_BYTES && return false
+    length(pk) != PK_BYTES && return false
 
     # Unpack pk
     rho = pk[1:SEEDBYTES]
@@ -621,20 +634,10 @@ function dilithium_verify(msg::Vector{UInt8}, sig::Vector{UInt8}, pk::Vector{UIn
         poly_chknorm(z[i], GAMMA1 - BETA) && return false
     end
 
-    # mu = CRH(H(pk) || msg)
-    tr = SHA.shake256(pk, UInt64(TRBYTES))
-    # FIPS 204 pure mode: pre = [0x00, ctxlen, ctx...]
-    pre = vcat(UInt8[0x00, UInt8(length(context))], context)
-    mu = SHA.shake256(vcat(tr, pre, msg), UInt64(CRHBYTES))
-
     # Expand A, compute w1' = Az - c*t1*2^D
     cp = zeros(Int32, N)
     poly_challenge!(cp, c_tilde)
-
-    A = [zeros(Int32, N) for _ in 1:K, _ in 1:L]
-    for i in 1:K, j in 1:L
-        poly_uniform!(A[i,j], rho, UInt16((i-1) << 8 | (j-1)))
-    end
+    A = expand_A(rho)
 
     for i in 1:L; ntt!(z[i]); end
     w1p = [zeros(Int32, N) for _ in 1:K]
@@ -665,16 +668,24 @@ function dilithium_verify(msg::Vector{UInt8}, sig::Vector{UInt8}, pk::Vector{UIn
         end
     end
 
-    # Check hint count
-    hint_count = sum(sum(h[i][j] for j in 1:N) for i in 1:K)
-    hint_count > OMEGA && return false
-
     # Recompute challenge
     w1_packed = UInt8[]
     for i in 1:K; append!(w1_packed, polyw1_pack(w1p[i])); end
     c2 = SHA.shake256(vcat(mu, w1_packed), UInt64(CTILDEBYTES))
 
     return c_tilde == c2
+end
+
+"""ML-DSA.Verify_internal (FIPS 204 Alg. 8) on the formatted message M′."""
+function dilithium_verify_internal(mprime::Vector{UInt8}, sig::Vector{UInt8}, pk::Vector{UInt8})
+    length(pk) != PK_BYTES && return false
+    return dilithium_verify_mu(mu_of(SHA.shake256(pk, UInt64(TRBYTES)), mprime), sig, pk)
+end
+
+"""ML-DSA.Verify (FIPS 204 Alg. 3). A context over 255 bytes is rejected (returns false)."""
+function dilithium_verify(msg::Vector{UInt8}, sig::Vector{UInt8}, pk::Vector{UInt8}; context::Vector{UInt8}=UInt8[])
+    length(context) > 255 && return false
+    return dilithium_verify_internal(pure_mprime(msg, context), sig, pk)
 end
 
 # ==================== PREHASH (HashML-DSA) ====================
@@ -726,276 +737,29 @@ function prehash_message(msg::Vector{UInt8}, hash_alg::String)::Vector{UInt8}
     end
 end
 
-"""Sign with pre-hash (HashML-DSA, FIPS 204 Algorithm 4)."""
-function dilithium_sign_prehash(msg::Vector{UInt8}, sk::Vector{UInt8}, hash_alg::String;
-                                 hedged::Bool=false, context::Vector{UInt8}=UInt8[])
-    length(context) > 255 && error("Context string must be ≤ 255 bytes (FIPS 204 §5.2)")
-    haskey(HASH_OIDS, hash_alg) || error("Unknown hash: $hash_alg")
-    oid = HASH_OIDS[hash_alg]
-    ph_m = prehash_message(msg, hash_alg)
-
-    # Construct M\' with domain separator 0x01
-    # M\' = 0x01 || ctxlen || ctx || OID || PH(M)
-    pre = vcat(UInt8[0x01, UInt8(length(context))], context, oid, ph_m)
-
-    # Call sign_internal with pre as the "message"
-    # We need to modify the mu derivation to use pre instead of the standard pure prefix
-    # Since sign_derand constructs: pre_pure = [0x00, ctxlen, ctx...]; mu = H(tr || pre_pure || msg)
-    # For prehash: mu = H(tr || pre)  (pre already contains everything)
-    rnd = hedged ? rand(UInt8, 32) : zeros(UInt8, 32)
-
-    # Extract sk components to compute mu directly
-    pos = 1
-    rho = sk[pos:pos+SEEDBYTES-1]; pos += SEEDBYTES
-    key = sk[pos:pos+SEEDBYTES-1]; pos += SEEDBYTES
-    tr = sk[pos:pos+TRBYTES-1]; pos += TRBYTES
-
-    # mu = H(tr || pre) where pre = [0x01, ctxlen, ctx, OID, PH(M)]
-    mu = SHA.shake256(vcat(tr, pre), UInt64(CRHBYTES))
-
-    # rhoprime = H(key || rnd || mu)
-    rhoprime = SHA.shake256(vcat(key, rnd, mu), UInt64(CRHBYTES))
-
-    # Rest of signing is identical — unpack s1/s2/t0, expand A, rejection loop
-    # For simplicity, we construct a fake "message" that when combined with
-    # the pure-mode prefix [0x00, 0x00], produces the same mu.
-    # Actually easier: just call the existing sign with a custom pre.
-    # But sign_derand hardcodes the pure pre. We need a lower-level entry.
-    # Let me directly use the sign loop with the computed mu and rhoprime.
-
-    # Unpack s1, s2, t0 from sk
-    s1 = [zeros(Int32, N) for _ in 1:L]
-    for i in 1:L; polyeta_unpack!(s1[i], sk[pos:pos+POLYETA_PACKED-1]); pos += POLYETA_PACKED; end
-    s2 = [zeros(Int32, N) for _ in 1:K]
-    for i in 1:K; polyeta_unpack!(s2[i], sk[pos:pos+POLYETA_PACKED-1]); pos += POLYETA_PACKED; end
-    t0 = [zeros(Int32, N) for _ in 1:K]
-    for i in 1:K
-        polyt0_unpack!(t0[i], sk[pos:pos+POLYT0_PACKED-1]); pos += POLYT0_PACKED
-    end
-
-    # Expand A, NTT(s1), NTT(s2), NTT(t0)
-    A = [zeros(Int32, N) for _ in 1:K, _ in 1:L]
-    for i in 1:K, j in 1:L; poly_uniform!(A[i,j], rho, UInt16((i-1) << 8 | (j-1))); end
-    for i in 1:L; ntt!(s1[i]); end
-    for i in 1:K; ntt!(s2[i]); end
-    for i in 1:K; ntt!(t0[i]); end
-
-    nonce = 0  # Int, not UInt16 — avoids overflow at 9362 iterations for L=7 (pq-crystals/dilithium#110)
-    y = [zeros(Int32, N) for _ in 1:L]
-    zy = [zeros(Int32, N) for _ in 1:L]
-    z = [zeros(Int32, N) for _ in 1:L]
-    w1 = [zeros(Int32, N) for _ in 1:K]
-    w0 = [zeros(Int32, N) for _ in 1:K]
-    h = [zeros(Int32, N) for _ in 1:K]
-    cp = zeros(Int32, N)
-    tmp = zeros(Int32, N)
-
-    while true
-        for i in 1:L; poly_uniform_gamma1!(y[i], rhoprime, (L * nonce + i - 1) % UInt16); end
-        for i in 1:L; copyto!(zy[i], y[i]); end
-        for i in 1:L; ntt!(zy[i]); end
-        for i in 1:K
-            fill!(w1[i], Int32(0))
-            for j in 1:L; poly_pointwise!(tmp, A[i,j], zy[j]); poly_add!(w1[i], w1[i], tmp); end
-            poly_reduce!(w1[i]); invntt!(w1[i]); poly_caddq!(w1[i])
-        end
-        for i in 1:K; for j in 1:N; w1[i][j], w0[i][j] = decompose(w1[i][j]); end; end
-        w1_packed = UInt8[]
-        for i in 1:K; append!(w1_packed, polyw1_pack(w1[i])); end
-        c_tilde = SHA.shake256(vcat(mu, w1_packed), UInt64(CTILDEBYTES))
-        poly_challenge!(cp, c_tilde)
-        cp_hat = copy(cp); ntt!(cp_hat)
-
-        for i in 1:L; poly_pointwise!(z[i], cp_hat, s1[i]); invntt!(z[i]); poly_add!(z[i], z[i], y[i]); poly_reduce!(z[i]); end
-        reject = any(poly_chknorm(z[i], GAMMA1 - BETA) for i in 1:L)
-        if reject; nonce += 1; continue; end
-
-        for i in 1:K; poly_pointwise!(tmp, cp_hat, s2[i]); invntt!(tmp); poly_sub!(w0[i], w0[i], tmp); poly_reduce!(w0[i]); end
-        reject = any(poly_chknorm(w0[i], GAMMA2 - BETA) for i in 1:K)
-        if reject; nonce += 1; continue; end
-
-        for i in 1:K; poly_pointwise!(h[i], cp_hat, t0[i]); invntt!(h[i]); poly_reduce!(h[i]); end
-        reject = any(poly_chknorm(h[i], GAMMA2) for i in 1:K)
-        if reject; nonce += 1; continue; end
-
-        for i in 1:K; poly_add!(w0[i], w0[i], h[i]); end
-        hints_count = 0
-        for i in 1:K; for j in 1:N; h[i][j] = Int32(make_hint(w0[i][j], w1[i][j])); hints_count += h[i][j]; end; end
-        if hints_count > OMEGA; nonce += 1; continue; end
-
-        sig = copy(c_tilde)
-        for i in 1:L; append!(sig, polyz_pack(z[i])); end
-        h_packed = zeros(UInt8, OMEGA + K)
-        local k_pos = 0
-        for i in 1:K
-            for j in 1:N; if h[i][j] != 0; h_packed[k_pos + 1] = UInt8(j - 1); k_pos += 1; end; end
-            h_packed[OMEGA + i] = UInt8(k_pos)
-        end
-        append!(sig, h_packed)
-        return sig
-    end
-end
-
-"""Verify with pre-hash (HashML-DSA, FIPS 204 Algorithm 5)."""
-function dilithium_verify_prehash(msg::Vector{UInt8}, sig::Vector{UInt8}, pk::Vector{UInt8},
-                                    hash_alg::String; context::Vector{UInt8}=UInt8[])
-    length(context) > 255 && error("Context string must be ≤ 255 bytes (FIPS 204 §5.2)")
+# M′ for HashML-DSA (FIPS 204 Alg. 4/5): 0x01 ‖ |ctx| ‖ ctx ‖ OID ‖ PH(M).
+function prehash_mprime(msg::Vector{UInt8}, hash_alg::String, context::Vector{UInt8})
     haskey(HASH_OIDS, hash_alg) || error("Unknown hash algorithm: $hash_alg")
-    oid = HASH_OIDS[hash_alg]
-    ph_m = prehash_message(msg, hash_alg)
-
-    # Construct pre with 0x01 domain separator
-    pre = vcat(UInt8[0x01, UInt8(length(context))], context, oid, ph_m)
-
-    # Verify uses mu = H(tr || pre) — same as sign_prehash
-    # We can call the existing verify but with a custom pre
-    # Actually, our verify already constructs pre = [0x00, ctxlen, ctx...] internally
-    # We need to override that. Simplest: inline the verify with the prehash pre.
-
-    length(sig) != SIG_BYTES && return false
-
-    rho = pk[1:SEEDBYTES]
-    t1 = [zeros(Int32, N) for _ in 1:K]
-    for i in 1:K; polyt1_unpack!(t1[i], pk[SEEDBYTES+(i-1)*POLYT1_PACKED+1:SEEDBYTES+i*POLYT1_PACKED]); end
-
-    c_tilde = sig[1:CTILDEBYTES]
-    z = [zeros(Int32, N) for _ in 1:L]
-    local vpos = CTILDEBYTES + 1
-    for i in 1:L; polyz_unpack!(z[i], sig[vpos:vpos+POLYZ_PACKED-1]); vpos += POLYZ_PACKED; end
-
-    h = [zeros(Int32, N) for _ in 1:K]
-    h_raw = sig[vpos:end]
-    local k_pos = 0
-    for i in 1:K
-        limit = Int(h_raw[OMEGA + i])
-        (limit < k_pos || limit > OMEGA) && return false
-        for j in (k_pos+1):limit
-            idx = Int(h_raw[j]) + 1
-            (j > k_pos + 1 && h_raw[j] <= h_raw[j-1]) && return false
-            h[i][idx] = Int32(1)
-        end
-        k_pos = limit
-    end
-    for j in (k_pos+1):OMEGA; h_raw[j] != 0 && return false; end
-
-    for i in 1:L; poly_chknorm(z[i], GAMMA1 - BETA) && return false; end
-
-    hint_count = sum(sum(h[i][j] for j in 1:N) for i in 1:K)
-    hint_count > OMEGA && return false
-
-    # mu with prehash pre
-    tr = SHA.shake256(pk, UInt64(TRBYTES))
-    mu = SHA.shake256(vcat(tr, pre), UInt64(CRHBYTES))
-
-    cp = zeros(Int32, N); poly_challenge!(cp, c_tilde)
-    A = [zeros(Int32, N) for _ in 1:K, _ in 1:L]
-    for i in 1:K, j in 1:L; poly_uniform!(A[i,j], rho, UInt16((i-1) << 8 | (j-1))); end
-
-    for i in 1:L; ntt!(z[i]); end
-    w1p = [zeros(Int32, N) for _ in 1:K]
-    tmp = zeros(Int32, N)
-    for i in 1:K
-        fill!(w1p[i], Int32(0))
-        for j in 1:L; poly_pointwise!(tmp, A[i,j], z[j]); poly_add!(w1p[i], w1p[i], tmp); end
-    end
-
-    ntt!(cp)
-    for i in 1:K
-        poly_shiftl!(t1[i]); ntt!(t1[i])
-        poly_pointwise!(tmp, cp, t1[i])
-        poly_sub!(w1p[i], w1p[i], tmp)
-        poly_reduce!(w1p[i]); invntt!(w1p[i]); poly_caddq!(w1p[i])
-    end
-
-    for i in 1:K; for j in 1:N; w1p[i][j] = use_hint(w1p[i][j], h[i][j] != 0); end; end
-
-    w1_packed = UInt8[]
-    for i in 1:K; append!(w1_packed, polyw1_pack(w1p[i])); end
-    c2 = SHA.shake256(vcat(mu, w1_packed), UInt64(CTILDEBYTES))
-
-    return c_tilde == c2
+    return vcat(UInt8[0x01, UInt8(length(context))], context, HASH_OIDS[hash_alg], prehash_message(msg, hash_alg))
 end
 
-# ==================== INTERNAL SIGNING INTERFACE ====================
-
-"""Sign with explicit mu (internal interface, externalMu=true)."""
-function dilithium_sign_internal_mu(mu::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8})
-    length(mu) == CRHBYTES || error("mu must be $CRHBYTES bytes")
-
-    pos = 1
-    rho = sk[pos:pos+SEEDBYTES-1]; pos += SEEDBYTES
-    key = sk[pos:pos+SEEDBYTES-1]; pos += SEEDBYTES
-    tr = sk[pos:pos+TRBYTES-1]; pos += TRBYTES
-
-    s1 = [zeros(Int32, N) for _ in 1:L]
-    for i in 1:L; polyeta_unpack!(s1[i], sk[pos:pos+POLYETA_PACKED-1]); pos += POLYETA_PACKED; end
-    s2 = [zeros(Int32, N) for _ in 1:K]
-    for i in 1:K; polyeta_unpack!(s2[i], sk[pos:pos+POLYETA_PACKED-1]); pos += POLYETA_PACKED; end
-    t0 = [zeros(Int32, N) for _ in 1:K]
-    for i in 1:K
-        polyt0_unpack!(t0[i], sk[pos:pos+POLYT0_PACKED-1]); pos += POLYT0_PACKED
-    end
-
-    A = [zeros(Int32, N) for _ in 1:K, _ in 1:L]
-    for i in 1:K, j in 1:L; poly_uniform!(A[i,j], rho, UInt16((i-1) << 8 | (j-1))); end
-    for i in 1:L; ntt!(s1[i]); end
-    for i in 1:K; ntt!(s2[i]); end
-    for i in 1:K; ntt!(t0[i]); end
-
-    rhoprime = SHA.shake256(vcat(key, rnd, mu), UInt64(CRHBYTES))
-
-    nonce = 0  # Int, not UInt16 — avoids overflow at 9362 iterations for L=7 (pq-crystals/dilithium#110)
-    y = [zeros(Int32, N) for _ in 1:L]
-    zy = [zeros(Int32, N) for _ in 1:L]
-    z = [zeros(Int32, N) for _ in 1:L]
-    w1 = [zeros(Int32, N) for _ in 1:K]
-    w0 = [zeros(Int32, N) for _ in 1:K]
-    h = [zeros(Int32, N) for _ in 1:K]
-    cp = zeros(Int32, N)
-    tmp = zeros(Int32, N)
-
-    while true
-        for i in 1:L; poly_uniform_gamma1!(y[i], rhoprime, (L * nonce + i - 1) % UInt16); end
-        for i in 1:L; copyto!(zy[i], y[i]); end
-        for i in 1:L; ntt!(zy[i]); end
-        for i in 1:K
-            fill!(w1[i], Int32(0))
-            for j in 1:L; poly_pointwise!(tmp, A[i,j], zy[j]); poly_add!(w1[i], w1[i], tmp); end
-            poly_reduce!(w1[i]); invntt!(w1[i]); poly_caddq!(w1[i])
-        end
-        for i in 1:K; for j in 1:N; w1[i][j], w0[i][j] = decompose(w1[i][j]); end; end
-        w1_packed = UInt8[]; for i in 1:K; append!(w1_packed, polyw1_pack(w1[i])); end
-        c_tilde = SHA.shake256(vcat(mu, w1_packed), UInt64(CTILDEBYTES))
-        poly_challenge!(cp, c_tilde); cp_hat = copy(cp); ntt!(cp_hat)
-
-        for i in 1:L; poly_pointwise!(z[i], cp_hat, s1[i]); invntt!(z[i]); poly_add!(z[i], z[i], y[i]); poly_reduce!(z[i]); end
-        any(poly_chknorm(z[i], GAMMA1 - BETA) for i in 1:L) && (nonce += 1; continue)
-
-        for i in 1:K; poly_pointwise!(tmp, cp_hat, s2[i]); invntt!(tmp); poly_sub!(w0[i], w0[i], tmp); poly_reduce!(w0[i]); end
-        any(poly_chknorm(w0[i], GAMMA2 - BETA) for i in 1:K) && (nonce += 1; continue)
-
-        for i in 1:K; poly_pointwise!(h[i], cp_hat, t0[i]); invntt!(h[i]); poly_reduce!(h[i]); end
-        any(poly_chknorm(h[i], GAMMA2) for i in 1:K) && (nonce += 1; continue)
-
-        for i in 1:K; poly_add!(w0[i], w0[i], h[i]); end
-        hints_count = 0
-        for i in 1:K; for j in 1:N; h[i][j] = Int32(make_hint(w0[i][j], w1[i][j])); hints_count += h[i][j]; end; end
-        hints_count > OMEGA && (nonce += 1; continue)
-
-        sig = copy(c_tilde)
-        for i in 1:L; append!(sig, polyz_pack(z[i])); end
-        h_packed = zeros(UInt8, OMEGA + K); local k_pos = 0
-        for i in 1:K; for j in 1:N; if h[i][j] != 0; h_packed[k_pos+1] = UInt8(j-1); k_pos += 1; end; end; h_packed[OMEGA+i] = UInt8(k_pos); end
-        append!(sig, h_packed)
-        return sig
-    end
+"""HashML-DSA.Sign (FIPS 204 Alg. 4) with caller-supplied 32-byte `rnd`."""
+function dilithium_sign_prehash_derand(msg::Vector{UInt8}, sk::Vector{UInt8}, hash_alg::String, rnd::Vector{UInt8};
+                                       context::Vector{UInt8}=UInt8[])
+    length(context) > 255 && error("Context string must be ≤ 255 bytes (FIPS 204 §5.2)")
+    return dilithium_sign_internal(prehash_mprime(msg, hash_alg, context), sk, rnd)
 end
 
-"""Sign with message (internal interface). Applies pure-mode domain separator per FIPS 204."""
-function dilithium_sign_internal_msg(msg::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8})
-    tr = sk[2*SEEDBYTES+1:2*SEEDBYTES+TRBYTES]
-    # FIPS 204 pure mode: pre = [0x00, 0x00] (empty context)
-    mu = SHA.shake256(vcat(tr, UInt8[0x00, 0x00], msg), UInt64(CRHBYTES))
-    return dilithium_sign_internal_mu(mu, sk, rnd)
+"""HashML-DSA.Sign (FIPS 204 Alg. 4). Hedged by default; `hedged=false` is the deterministic variant."""
+function dilithium_sign_prehash(msg::Vector{UInt8}, sk::Vector{UInt8}, hash_alg::String;
+                                hedged::Bool=true, context::Vector{UInt8}=UInt8[])
+    rnd = hedged ? rand(RandomDevice(), UInt8, 32) : zeros(UInt8, 32)
+    return dilithium_sign_prehash_derand(msg, sk, hash_alg, rnd; context=context)
 end
 
+"""HashML-DSA.Verify (FIPS 204 Alg. 5). A context over 255 bytes is rejected (returns false)."""
+function dilithium_verify_prehash(msg::Vector{UInt8}, sig::Vector{UInt8}, pk::Vector{UInt8},
+                                  hash_alg::String; context::Vector{UInt8}=UInt8[])
+    length(context) > 255 && return false
+    return dilithium_verify_internal(prehash_mprime(msg, hash_alg, context), sig, pk)
+end

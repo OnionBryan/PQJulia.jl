@@ -389,11 +389,35 @@ function kyber_indcpa_dec(ct::Vector{UInt8}, sk::Vector{UInt8})
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
+# FIPS 203 input checks (§7.2 Encaps, §7.3 Decaps)
+# ══════════════════════════════════════════════════════════════════════════════
+
+"""Encapsulation key check: correct length and every 12-bit coefficient < q (modulus check)."""
+function kyber_ek_check(ek::AbstractVector{UInt8})
+    length(ek) == KYBER_PUBLICKEYBYTES || return false
+    for i in 1:3:KYBER_POLYVECBYTES
+        a0 = UInt16(ek[i]) | (UInt16(ek[i+1]) & 0x0f) << 8
+        a1 = UInt16(ek[i+1]) >> 4 | UInt16(ek[i+2]) << 4
+        (a0 >= KYBER_Q || a1 >= KYBER_Q) && return false
+    end
+    return true
+end
+
+"""Decapsulation key check: correct length and the embedded H(ek) matches ek (hash check)."""
+function kyber_dk_check(dk::AbstractVector{UInt8})
+    length(dk) == KYBER_SECRETKEYBYTES || return false
+    ek = dk[KYBER_INDCPA_SECRETKEYBYTES+1:KYBER_INDCPA_SECRETKEYBYTES+KYBER_PUBLICKEYBYTES]
+    h = dk[KYBER_SECRETKEYBYTES-2*KYBER_SYMBYTES+1:KYBER_SECRETKEYBYTES-KYBER_SYMBYTES]
+    return kyber_hash_h(ek) == h
+end
+
+# ══════════════════════════════════════════════════════════════════════════════
 # CCA2 KEM KeyGen (kem.c:25 -- crypto_kem_keypair_derand)
 # ══════════════════════════════════════════════════════════════════════════════
 # sk_kem = sk_cpa || pk || H(pk) || z
 
 function kyber_kem_keypair_derand(coins::Vector{UInt8})
+    length(coins) == 2 * KYBER_SYMBYTES || throw(ArgumentError("keygen coins must be $(2 * KYBER_SYMBYTES) bytes (d ‖ z)"))
     # coins is 2*KYBER_SYMBYTES = 64 bytes
     # First 32 bytes -> indcpa keygen seed, last 32 bytes -> z
     pk, sk_cpa = kyber_indcpa_keypair_derand(coins[1:KYBER_SYMBYTES])
@@ -416,6 +440,8 @@ end
 # ══════════════════════════════════════════════════════════════════════════════
 
 function kyber_kem_enc_derand(pk::Vector{UInt8}, coins::Vector{UInt8})
+    kyber_ek_check(pk) || throw(ArgumentError("$IDENTIFIER encapsulation key failed the FIPS 203 input check"))
+    length(coins) == KYBER_SYMBYTES || throw(ArgumentError("coins must be $KYBER_SYMBYTES bytes"))
     # buf = coins (the message m)
     buf = copy(coins[1:KYBER_SYMBYTES])
 
@@ -445,6 +471,8 @@ end
 # ══════════════════════════════════════════════════════════════════════════════
 
 function kyber_kem_dec(ct::Vector{UInt8}, sk::Vector{UInt8})
+    length(ct) == KYBER_CIPHERTEXTBYTES || throw(ArgumentError("$IDENTIFIER ciphertext must be $KYBER_CIPHERTEXTBYTES bytes"))
+    kyber_dk_check(sk) || throw(ArgumentError("$IDENTIFIER decapsulation key failed the FIPS 203 input check"))
     # Parse the KEM secret key
     sk_cpa = sk[1:KYBER_INDCPA_SECRETKEYBYTES]
     pk     = sk[KYBER_INDCPA_SECRETKEYBYTES+1:KYBER_INDCPA_SECRETKEYBYTES+KYBER_PUBLICKEYBYTES]

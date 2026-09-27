@@ -1,0 +1,9 @@
+[deps]
+BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
+PQJulia = "a7f3c8d1-5e2b-4f9a-8c6d-3b1e7f4a2d5c"
+
+[sources]
+PQJulia = {path = ".."}
+
+[compat]
+BenchmarkTools = "1.7"

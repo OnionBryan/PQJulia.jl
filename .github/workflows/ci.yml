@@ -8,7 +8,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -18,8 +22,7 @@ jobs:
 
       - uses: julia-actions/cache@v3
 
-      - name: Install dependencies
-        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
-
       - name: Run tests
-        run: julia --project=. test/runtests.jl
+        env:
+          PQJULIA_LONG_TESTS: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}
+        run: julia --project=. -e 'using Pkg; Pkg.test()'

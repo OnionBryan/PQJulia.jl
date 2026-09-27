@@ -18,11 +18,23 @@ import ..FalconFFT as FF
 const q = 12289
 
 # Exact negacyclic multiply a·b mod (xⁿ+1) over ℤ: Karatsuba full product, then fold x^n = −1.
+# When |a_i|·|b_j|·n < 2^126 the product is computed exactly in Int128 instead.
 function negamul(a::AbstractVector, b::AbstractVector)
     n = length(a)
+    maxbits(a) + maxbits(b) + ndigits(n, base=2) <= 126 && return BigInt.(negamul_i128(a, b))
     n < 32 && return negamul_school(a, b)
     ab = karamul(BigInt.(a), BigInt.(b))
     [ab[i] - ab[i+n] for i in 1:n]
+end
+
+function negamul_i128(a::AbstractVector, b::AbstractVector)
+    n = length(a); A = Int128.(a); B = Int128.(b); c = zeros(Int128, n)
+    @inbounds for i in 1:n
+        ai = A[i]
+        for j in 1:n-i+1; c[i+j-1] += ai * B[j]; end
+        for j in n-i+2:n; c[i+j-1-n] -= ai * B[j]; end
+    end
+    c
 end
 
 # Full (2n-length) product of two length-n (n a power of 2) coefficient vectors, as ntrugen.py karamul.
@@ -119,8 +131,8 @@ function reduce!(f, g, F, G)
         Ff = FF.fft(Float64.(F .>> sh)); Gf = FF.fft(Float64.(G .>> sh))
         k = round.(BigInt, real.(FF.ifft((Ff .* conj.(ff) .+ Gf .* conj.(gf)) ./ den)))
         all(iszero, k) && break
-        kb = k .<< (sh - shf)
-        F .-= negamul(kb, f); G .-= negamul(kb, g)
+        s = sh - shf                               # (k << s)·f = (k·f) << s
+        F .-= negamul(k, f) .<< s; G .-= negamul(k, g) .<< s
     end
     F, G
 end

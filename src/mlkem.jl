@@ -42,6 +42,7 @@ for (category, params) in CATEGORY_PARAMS
     export kyber_kem_keypair, kyber_kem_keypair_derand
     export kyber_kem_enc, kyber_kem_enc_derand
     export kyber_kem_dec
+    export kyber_ek_check, kyber_dk_check
 
     # Import shared primitives from parent MLKEM module (defined in kyber_core.jl)
     import ..MLKEM: KYBER_N, KYBER_Q, KYBER_SYMBYTES, KYBER_POLYBYTES, KYBER_ZETAS, KYBER_MONT, KYBER_QINV

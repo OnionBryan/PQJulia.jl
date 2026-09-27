@@ -8,7 +8,8 @@
 # ============================================================================
 module FalconSampler
 
-using SHA
+using SHA, Random
+import ..FalconChaCha
 
 export RNG, KATSource, randbytes, samplerz, MAX_SIGMA
 
@@ -33,8 +34,8 @@ const APPROXEXP_C = UInt64[
     0x155555555581FF00, 0x400000000002B400, 0x7FFFFFFFFFFF4800,
     0x8000000000000000]
 
-# ── Byte RNG (swappable; ChaCha20 in the reference). SHAKE256(seed‖counter)
-# stream — deterministic for tests, swap to a CSPRNG/ChaCha20 for production. ──
+# ── Auxiliary byte RNG: SHAKE256(seed‖counter) stream. Signing and keygen use
+# FalconChaCha.ChaCha20 seeded from the OS, as the reference does. ──
 mutable struct RNG
     seed::Vector{UInt8}
     ctr::UInt64
@@ -42,7 +43,7 @@ mutable struct RNG
     pos::Int
 end
 RNG(seed::Vector{UInt8}) = RNG(copy(seed), UInt64(0), UInt8[], 1)
-RNG() = RNG(rand(UInt8, 32))
+RNG() = RNG(rand(RandomDevice(), UInt8, 32))
 function _refill!(r::RNG)
     ctrbytes = reinterpret(UInt8, [r.ctr]); r.ctr += 1
     r.buf = SHA.shake256(vcat(r.seed, ctrbytes), UInt64(512)); r.pos = 1
@@ -55,6 +56,8 @@ function randbytes(r::RNG, k::Int)
     end
     out
 end
+
+randbytes(r::FalconChaCha.ChaCha20, k::Int) = FalconChaCha.randbytes(r, k)
 
 # Deterministic KAT randomness: a fixed hex `octets` string consumed exactly like
 # the reference KAT_randbytes (take 2k hex chars, fromhex, byte-reverse).

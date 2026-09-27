@@ -40,27 +40,20 @@ function negacyclic_mul(a::AbstractVector, b::AbstractVector)
 end
 
 # ── Complex FFT over R[x]/(xⁿ+1) ────────────────────────────────────────────
-roots(n) = ComplexF64[cis(π * (2k + 1) / n) for k in 0:n-1]   # ζ_k, the n roots of xⁿ+1
+# ζ_k, the n roots of xⁿ+1; (2k+1)/n is exact for n a power of 2, so cispi rounds each root once.
+const ROOTS = Dict{Int,Vector{ComplexF64}}()
+roots(n) = get!(() -> ComplexF64[cispi((2k + 1) / n) for k in 0:n-1], ROOTS, n)
 
+# fft(f) = merge_fft(fft(f_even), fft(f_odd)): O(n log n), each root used once per level.
 function fft(f::AbstractVector)
-    n = length(f); ζ = roots(n)
-    F = Vector{ComplexF64}(undef, n)
-    @inbounds for k in 1:n
-        acc = ComplexF64(0); z = ζ[k]; p = ComplexF64(1)
-        for j in 1:n; acc += f[j] * p; p *= z; end          # Σ f[j] ζ_k^{j-1}
-        F[k] = acc
-    end
-    F
+    length(f) == 1 && return ComplexF64[f[1]]
+    f0, f1 = split(f)
+    merge_fft(fft(f0), fft(f1))
 end
 function ifft(F::AbstractVector)
-    n = length(F); ζ = roots(n)
-    f = Vector{ComplexF64}(undef, n)
-    @inbounds for j in 1:n
-        acc = ComplexF64(0)
-        for k in 1:n; acc += F[k] * conj(ζ[k])^(j-1); end    # ζ_k^{-(j-1)}
-        f[j] = acc / n
-    end
-    f
+    length(F) == 1 && return ComplexF64[F[1]]
+    F0, F1 = split_fft(F)
+    merge(ifft(F0), ifft(F1))
 end
 
 # FFT-domain arithmetic (all pointwise).
@@ -78,7 +71,7 @@ function split_fft(F::AbstractVector)
     F0 = Vector{ComplexF64}(undef, h); F1 = Vector{ComplexF64}(undef, h)
     @inbounds for k in 1:h
         F0[k] = (F[k] + F[k+h]) / 2
-        F1[k] = (F[k] - F[k+h]) / (2 * ζ[k])
+        F1[k] = (F[k] - F[k+h]) * conj(ζ[k]) / 2          # 1/ζ = conj(ζ) on |ζ| = 1
     end
     F0, F1
 end

@@ -2,12 +2,12 @@
 """
 PQJulia.jl Benchmark Suite
 ===========================
-33 benchmarks: 6 ML-KEM ops × 3 levels + 5 ML-DSA ops × 3 levels
+ML-KEM, ML-DSA and FN-DSA at every level, plus Shamir. Run: julia benchmarks/bench.jl
 Uses BenchmarkTools @benchmark for statistical rigor (min/median/mean/max).
 """
 
 using Pkg
-Pkg.activate(joinpath(@__DIR__, ".."))
+Pkg.activate(@__DIR__); Pkg.instantiate()
 
 using PQJulia
 using BenchmarkTools
@@ -79,6 +79,29 @@ for (name, Cat) in [
     # Verify
     sig = Cat.dilithium_sign(msg, sk)
     b = @benchmark $Cat.dilithium_verify($msg, $sig, $pk)
+    results["$(name)/Verify"] = b
+    println("  Verify:  $(BenchmarkTools.prettytime(median(b).time))")
+end
+
+# ═══════════════════════════════════════════════════════════════
+# FN-DSA (Falcon) Benchmarks
+# ═══════════════════════════════════════════════════════════════
+for (name, Cat) in [("Falcon-512", FNDSA.Falcon512), ("Falcon-1024", FNDSA.Falcon1024)]
+    println("\n--- $name ---")
+
+    b = @benchmark $Cat.falcon_keygen() seconds=30 samples=10
+    results["$(name)/KeyGen"] = b
+    println("  KeyGen:  $(BenchmarkTools.prettytime(median(b).time))")
+
+    pk, sk = Cat.falcon_keygen()
+    ek = Cat.falcon_expand_sk(sk)
+
+    b = @benchmark $Cat.falcon_sign($msg, $ek)
+    results["$(name)/Sign"] = b
+    println("  Sign:    $(BenchmarkTools.prettytime(median(b).time))  (expanded key)")
+
+    sig = Cat.falcon_sign(msg, ek)
+    b = @benchmark $Cat.falcon_verify($msg, $sig, $pk)
     results["$(name)/Verify"] = b
     println("  Verify:  $(BenchmarkTools.prettytime(median(b).time))")
 end

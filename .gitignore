@@ -1,6 +1,12 @@
 Manifest.toml
 *.bin
 .DS_Store
-native/*.dylib
-native/*.o
-native/test_galerkin_k2
+docs/
+benchmarks/Manifest.toml
+test/interop/liboqs_shim.*
+research/
+native/
+ROADMAP.md
+src/falcon/falcon_precision.jl
+test/falcon_precision.jl
+test/homological_shamir_test.jl
