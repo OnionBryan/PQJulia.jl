@@ -60,7 +60,7 @@ constant-time code is not guaranteed to stay constant-time after compilation.
 | ML-DSA Verify threw on context > 255 bytes and on malformed keys | FIPS 204 Alg. 3 | Fixed — returns false |
 | ML-DSA signing accepted secret keys with s1/s2 outside [−η, η] | Wycheproof `InvalidPrivateKey` | Fixed — rejected |
 | Falcon FFT lost ~8 bits of the 53-bit mantissa (naive O(n²) power accumulation) | Comparison against a 256-bit reference ffLDL tree | Fixed — split/merge FFT with exactly-rounded roots |
-| X25519 decoded the scalar and encoded the shared secret through BigInt (GMP), whose timing depends on the value (dudect \|t\| ≈ 20 on M1 and Broadwell) | `test/timing/dudect.jl` | Fixed — 64-bit word arithmetic, no BigInt on secret data; type-stable, so no value-dependent boxing |
+| X25519 decoded the scalar and encoded the shared secret through BigInt (GMP), whose timing depends on the value (dudect \|t\| ≈ 20 on Apple M5 and Intel Broadwell) | `test/timing/dudect.jl` | Fixed — 64-bit word arithmetic, no BigInt on secret data; type-stable, so no value-dependent boxing |
 | Falcon signed with any key whose ffLDL leaves passed the GS-norm test only on paper | NIST FIPS 206 status update (Oct 2025) | Fixed — signing refuses keys with a leaf outside [σmin, σmax]; `falcon_keygen(certified=true)` and `falcon_certify` decide the leaf and GS-norm bounds exactly |
 
 ## Falcon Key Certificate

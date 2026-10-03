@@ -46,4 +46,4 @@ worst = maximum([
     dudect("X25519: fixed vs random scalar", k -> X25519.x25519(k, u), () -> copy(kfix), () -> rand(rng, UInt8, 32)),
     dudect("X25519 encoding: p vs p − 1", X25519.fe_tobytes, () -> p, () -> pm1),
 ])
-println(worst > 4.5 ? "\nTIMING DIFFERENCE DETECTED" : "\nNO TIMING DIFFERENCE DETECTED", " (N = $N, $(Sys.CPU_NAME))")
+println(worst > 4.5 ? "\nTIMING DIFFERENCE DETECTED" : "\nNO TIMING DIFFERENCE DETECTED", " (N = $N, $(strip(Sys.cpu_info()[1].model)))")
