@@ -1,6 +1,6 @@
 name = "PQJulia"
 uuid = "a7f3c8d1-5e2b-4f9a-8c6d-3b1e7f4a2d5c"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Bryan Gibson"]
 
 [deps]
