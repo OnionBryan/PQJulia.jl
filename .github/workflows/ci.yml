@@ -29,3 +29,41 @@ jobs:
 
       - name: Runtime-dispatch check
         run: julia test/timing/dispatch.jl
+
+  interop:
+    runs-on: ubuntu-latest
+    env:
+      OQS: ${{ github.workspace }}/../liboqs
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: julia-actions/setup-julia@v3
+        with:
+          version: '1.12'
+
+      - uses: julia-actions/cache@v3
+
+      - uses: actions/cache@v6
+        id: oqs
+        with:
+          path: ${{ env.OQS }}
+          key: liboqs-0.16.0-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Build liboqs 0.16.0
+        if: steps.oqs.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install -y ninja-build
+          git clone -q --depth 1 --branch 0.16.0 https://github.com/open-quantum-safe/liboqs "$RUNNER_TEMP/oqs-src"
+          cmake -S "$RUNNER_TEMP/oqs-src" -B "$RUNNER_TEMP/oqs-build" -GNinja -DOQS_BUILD_ONLY_LIB=ON \
+            -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DOQS_USE_OPENSSL=OFF \
+            -DCMAKE_INSTALL_PREFIX="$OQS" -DCMAKE_INSTALL_LIBDIR=lib
+          cmake --build "$RUNNER_TEMP/oqs-build"
+          cmake --install "$RUNNER_TEMP/oqs-build"
+
+      - name: Build shim
+        run: >
+          gcc -O2 -shared -fPIC -o test/interop/liboqs_shim.so test/interop/oqs_shim.c -I"$OQS/include"
+          -Wl,--whole-archive "$OQS/lib/liboqs.a" -Wl,--no-whole-archive
+
+      - name: liboqs interop
+        run: julia --project=. test/interop/liboqs_interop.jl

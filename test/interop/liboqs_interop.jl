@@ -1,5 +1,6 @@
 # test/interop/liboqs_interop.jl — two-way interop with liboqs (independent C implementations of
-# ML-KEM, ML-DSA and Falcon): keys, signatures and ciphertexts cross in both directions. Opt-in:
+# ML-KEM, ML-DSA and Falcon): keys, signatures and ciphertexts cross in both directions. Runs in CI
+# (.github/workflows/ci.yml builds the Linux shim). On macOS:
 #   clang -O2 -dynamiclib -o test/interop/liboqs_shim.dylib test/interop/oqs_shim.c \
 #     -I$(brew --prefix)/include -Wl,-force_load,$(brew --prefix)/lib/liboqs.a -L$(brew --prefix openssl@3)/lib -lcrypto
 #   julia --project=. test/interop/liboqs_interop.jl
@@ -88,3 +89,4 @@ for (name, M) in [("ML-KEM-512", MLKEM.Category1), ("ML-KEM-768", MLKEM.Category
     global allok &= kem_interop(name, M, 50)
 end
 println(allok ? "\nALL INTEROP CHECKS PASS (liboqs $(unsafe_string(ccall((:OQS_version, LIB), Cstring, ()))))" : "\nINTEROP FAILURES")
+exit(allok ? 0 : 1)

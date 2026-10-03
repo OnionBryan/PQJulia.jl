@@ -49,8 +49,8 @@ Everything below runs in CI (`Pkg.test()`):
   accumulated ML-DSA vectors (10,000 seeded keys per level in CI, byte-exact with the reference).
 - Property tests: round-trips, tamper rejection, malformed inputs.
 
-`test/interop/liboqs_interop.jl` (opt-in; needs liboqs) checks two-way interoperability with
-liboqs 0.15 for every scheme. Keys, signatures and ciphertexts produced by either side are
+`test/interop/liboqs_interop.jl` (runs in CI against liboqs 0.16.0 built from source) checks
+two-way interoperability with liboqs for every scheme. Keys, signatures and ciphertexts produced by either side are
 accepted by the other, and so are secret keys used for signing.
 
 ### Timing test
