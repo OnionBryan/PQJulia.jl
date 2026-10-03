@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -26,3 +26,6 @@ jobs:
         env:
           PQJULIA_LONG_TESTS: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}
         run: julia --project=. -e 'using Pkg; Pkg.test()'
+
+      - name: Runtime-dispatch check
+        run: julia test/timing/dispatch.jl
