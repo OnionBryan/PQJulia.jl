@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1
+
+- Falcon secret-key decoding is constant-time: Fermat inversion with a fixed exponent replaces the
+  extended Euclidean algorithm, and the NTRU check runs in Int64 instead of BigInt. dudect had
+  flagged both on an AMD EPYC 9B14.
+
 ## 0.3.0
 
 ### Security

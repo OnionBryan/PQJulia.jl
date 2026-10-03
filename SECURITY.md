@@ -63,7 +63,7 @@ into storage reserved at full size, so no partial copy is left behind by a reall
 
 What the caller owns stays the caller's to erase: secret keys, returned shared secrets, and an
 expanded Falcon key (`falcon_wipe!(ek)`). `wipe!` is exported for this. Not wiped: the Keccak state
-inside SHA.jl, and BigInt (GMP) values in Falcon keygen and key checks and in Shamir. Julia's
+inside SHA.jl, and BigInt (GMP) values in Falcon keygen and in Shamir. Julia's
 garbage collector does not move
 objects, but it does not lock pages either, so memory can reach swap or a core dump.
 
@@ -88,6 +88,7 @@ objects, but it does not lock pages either, so memory can reach swap or a core d
 | X25519 decoded the scalar and encoded the shared secret through BigInt (GMP), whose timing depends on the value (dudect \|t\| ≈ 20 on Apple M5 and Intel Broadwell) | `test/timing/dudect.jl` | Fixed — 64-bit word arithmetic, no BigInt on secret data; type-stable, so no value-dependent boxing |
 | ML-DSA keygen boxed the rejection counter of `poly_uniform_eta!` (a nested function reassigned an enclosing variable), so it ran through runtime dispatch on secret-derived data | `test/timing/dispatch.jl` (JET) | Fixed — top-level `rej_eta!`; type-stable |
 | Falcon signed with hardware floating point on secret data, which is not constant-time | Round-3 reference (FALCON_FPEMU) | Fixed — integer-emulated binary64; signatures unchanged bit for bit |
+| Falcon secret-key decoding inverted NTT coefficients of f with the extended Euclidean algorithm and checked the NTRU equation in BigInt, both variable-time on secret data (dudect \|t\| up to 27.6, AMD EPYC 9B14) | `test/timing/dudect.jl` | Fixed — Fermat inversion with a fixed exponent; NTRU check in Int64 |
 | `make_hint` compiled to conditional branches on x86-64 | Disassembly after a dudect flag (\|t\| 7.4, Intel i7-8086K) | Fixed — bitwise form, branch-free |
 | Falcon signed with any key whose ffLDL leaves passed the GS-norm test only on paper | NIST FIPS 206 status update (Oct 2025) | Fixed — signing refuses keys with a leaf outside [σmin, σmax]; `falcon_keygen(certified=true)` and `falcon_certify` decide the leaf and GS-norm bounds exactly |
 

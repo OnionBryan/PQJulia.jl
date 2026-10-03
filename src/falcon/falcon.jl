@@ -63,8 +63,28 @@ function ntt_inv(A)
     [Int(mod(C[i+1] * ni % q * powermod(ψi, i, q), q)) for i in 0:n-1]
 end
 is_invertible(f) = all(!=(0), ntt_fwd(mod.(f, q)))
+# x^(q−2) mod q: fixed public exponent, constant modulus, no Euclid on secret data.
+function invq(x::Int)
+    r = 1
+    for k in 13:-1:0
+        r = mod(r * r, q)
+        ((q - 2) >> k) & 1 == 1 && (r = mod(r * x, q))
+    end
+    r
+end
 poly_div_modq(a, b) = (A = ntt_fwd(mod.(a, q)); B = ntt_fwd(mod.(b, q));
-                       ntt_inv([mod(A[i] * invmod(B[i], q), q) for i in 1:length(A)]))
+                       ntt_inv([mod(A[i] * invq(B[i]), q) for i in 1:length(A)]))
+
+# f·G − g·F = q over ℤ[x]/(xⁿ+1), exact in Int64 for key-sized coefficients.
+function negamul_int(a, b)
+    n = length(a); c = zeros(Int, n)
+    @inbounds for i in 1:n, j in 1:n
+        k = i + j - 1
+        if k <= n; c[k] += a[i] * b[j]; else; c[k-n] -= a[i] * b[j]; end   # branch on indices only
+    end
+    c
+end
+ntru_check_int(f, g, F, G) = (d = negamul_int(f, G) .- negamul_int(g, F); ok = d == [q; zeros(Int, length(f) - 1)]; wipe!(d); ok)
 poly_mul_modq(a, b) = (A = ntt_fwd(mod.(a, q)); B = ntt_fwd(mod.(b, q));
                        ntt_inv([mod(A[i] * B[i], q) for i in 1:length(A)]))
 
@@ -417,7 +437,7 @@ function decode_sk(skb::AbstractVector{UInt8})
     if is_invertible(f)
         gF = poly_mul_modq(g, F); gF[1] = mod(gF[1] + q, q)
         G = centermod.(poly_div_modq(gF, f))
-        if fits(G, FFGG_BITS) && NG.ntru_check(BigInt.(f), BigInt.(g), BigInt.(F), BigInt.(G))
+        if fits(G, FFGG_BITS) && ntru_check_int(f, g, F, G)
             sk = secret_key(f, g, F, G)
         end
     end
