@@ -149,6 +149,7 @@ include("falcon_kat.jl")
 include("falcon_certify.jl")
 include("falcon_mrm.jl")
 include("falcon_fxp.jl")
+include("falcon_fpr.jl")
 include("vectors_extra.jl")
 
 # ==================== X25519 and X-Wing ====================

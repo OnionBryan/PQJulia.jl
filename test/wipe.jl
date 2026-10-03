@@ -52,5 +52,5 @@ end
     @test F.falcon_verify(msg, F.falcon_sign(msg, ek), pk)
     F.falcon_wipe!(ek)
     @test all(iszero, ek.sk.f) && all(iszero, ek.sk.F) && all(iszero, ek.gs.b00)
-    @test all(iszero, FNDSA.Falcon.leaves(ek.gs.T))
+    @test all(iszero, FNDSA.FalconFpr.leaves(ek.gs.T))
 end

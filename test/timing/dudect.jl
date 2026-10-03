@@ -7,18 +7,18 @@ const rng = Xoshiro(1)
 
 welch(a, b) = (mean(a) - mean(b)) / sqrt(var(a) / length(a) + var(b) / length(b))
 
-function dudect(name, f, inA, inB)
+function dudect(name, f, inA, inB; n=N)
     for _ in 1:200; f(inA()); f(inB()); end
-    cls = rand(rng, Bool, N)
+    cls = rand(rng, Bool, n)
     ins = [c ? inB() : inA() for c in cls]
-    x = Vector{Float64}(undef, N)
-    for i in 1:N
+    x = Vector{Float64}(undef, n)
+    for i in 1:n
         v = ins[i]
         t0 = time_ns(); f(v); x[i] = time_ns() - t0
     end
     ts = map(CROPS) do p
         th = quantile(x, p)
-        welch([x[i] for i in 1:N if !cls[i] && x[i] <= th], [x[i] for i in 1:N if cls[i] && x[i] <= th])
+        welch([x[i] for i in 1:n if !cls[i] && x[i] <= th], [x[i] for i in 1:n if cls[i] && x[i] <= th])
     end
     m = maximum(t -> isnan(t) ? 0.0 : abs(t), ts)    # NaN: crop below timer resolution
     println(rpad(name, 44), "max|t| = ", rpad(round(m, digits=2), 6), m > 4.5 ? " LEAK" : " ok",
@@ -51,6 +51,20 @@ decomp(v) = (s = 0; for y in v; a1, a0 = D.decompose(y); s ⊻= a1 ⊻ a0; end; 
 hints(v) = (s = 0; for y in v; s += D.make_hint(y, Int32(1)); end; s)
 noise(s) = (t = zeros(Int16, 256); MLKEM.kyber_poly_getnoise_eta1!(t, s, 0x00, 2); MLKEM.kyber_ntt!(t))
 
+# Falcon: integer floating point by rounding path, SamplerZ by center, signing by key.
+const FP = PQJulia.FNDSA.FalconFpr
+const F5 = FNDSA.Falcon512
+rf(lo, hi) = FP.fpr(rand(rng, (-1.0, 1.0)) * ldexp(1.0 + rand(rng), rand(rng, lo:hi)))
+mant(lo, hi) = FP.fpr(ldexp(lo + (hi - lo) * rand(rng), rand(rng, -9:9)))
+ops(f) = v -> (s = UInt64(0); for (y, z) in v; s ⊻= f(y, z).b; end; s)
+pairs64(g) = () -> [g() for _ in 1:64]
+const fska, fskb = F5.falcon_keygen()[2], F5.falcon_keygen()[2]
+const eka, ekb = F5.falcon_expand_sk(fska), F5.falcon_expand_sk(fskb)
+const fmsg = rand(rng, UInt8, 32)
+fsign(ek) = FNDSA.Falcon.sign_poly(ek.sk, ek.gs, fmsg)
+fsamp(μ) = FP.samplerz(μ, FP.fpr(1.5), FP.fpr(1.2778336969128337),
+                       PQJulia.FNDSA.FalconChaCha.ChaCha20(rand(rng, UInt8, 56)))
+
 worst = maximum([
     dudect("ML-KEM-768 decaps: valid vs tampered ct", c -> K.kyber_kem_dec(c, sk),
            () -> copy(ct), () -> (c = copy(ct); c[rand(rng, 1:length(c))] ⊻= 0x01; c)),
@@ -68,5 +82,25 @@ worst = maximum([
     dudect("X25519: scalar 0x00… vs 0xff…", k -> X25519.x25519(k, u), () -> zeros(UInt8, 32), () -> fill(0xff, 32)),
     dudect("X25519: fixed vs random scalar", k -> X25519.x25519(k, u), () -> copy(kfix), () -> rand(rng, UInt8, 32)),
     dudect("X25519 encoding: p vs p − 1", X25519.fe_tobytes, () -> p, () -> pm1),
+    dudect("fpr add: aligned vs far exponents", ops(FP.add),
+           pairs64(() -> (y = rf(-20, 20); (y, FP.fpr(Float64(y) * (1 + rand(rng)))))),
+           pairs64(() -> (rf(10, 20), rf(-60, -50)))),
+    dudect("fpr add: same vs opposite signs", ops(FP.add),
+           pairs64(() -> (y = rf(-9, 9); (y, FP.fpr(copysign(abs(Float64(rf(-9, 9))), Float64(y)))))),
+           pairs64(() -> (y = rf(-9, 9); (y, FP.fpr(-copysign(abs(Float64(rf(-9, 9))), Float64(y))))))),
+    dudect("fpr mul: product mantissa < 2 vs ≥ 2", ops(FP.mul),
+           pairs64(() -> (mant(1.0, 1.4), mant(1.0, 1.4))), pairs64(() -> (mant(1.5, 2.0), mant(1.5, 2.0)))),
+    dudect("fpr mul: nonzero vs zero operand", ops(FP.mul),
+           pairs64(() -> (rf(-20, 20), rf(-20, 20))), pairs64(() -> (rf(-20, 20), FP.ZERO))),
+    dudect("fpr div: quotient mantissa < 1 vs ≥ 1", ops(FP.div),
+           pairs64(() -> (y = rf(-5, 5); (y, FP.fpr(Float64(y) / (1 + rand(rng)) * 1.0000001)))),
+           pairs64(() -> (y = rf(-5, 5); (FP.fpr(Float64(y) * (1 + rand(rng))), y)))),
+    dudect("fpr sqrt: even vs odd exponent", v -> (s = UInt64(0); for y in v; s ⊻= sqrt(y).b; end; s),
+           pairs64(() -> FP.fpr(ldexp(1.0 + rand(rng), 2rand(rng, -10:10)))),
+           pairs64(() -> FP.fpr(ldexp(1.0 + rand(rng), 2rand(rng, -10:10) + 1)))),
+    dudect("Falcon SamplerZ: center frac < 0.1 vs ≈ 0.5", fsamp,
+           () -> FP.fpr(rand(rng, -50:50) + 0.1rand(rng)), () -> FP.fpr(rand(rng, -50:50) + 0.45 + 0.1rand(rng))),
+    dudect("Falcon-512 expand_sk: key A vs key B", F5.falcon_expand_sk, () -> copy(fska), () -> copy(fskb); n = N ÷ 10),
+    dudect("Falcon-512 sign: key A vs key B", fsign, () -> eka, () -> ekb; n = N ÷ 10),
 ])
 println(worst > 4.5 ? "\nTIMING DIFFERENCE DETECTED" : "\nNO TIMING DIFFERENCE DETECTED", " (N = $N, $(strip(Sys.cpu_info()[1].model)))")

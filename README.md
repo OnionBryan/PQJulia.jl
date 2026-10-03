@@ -62,18 +62,31 @@ constant-time and on secret-key paths:
   the NTT, `kyber_verify` and `kyber_cmov!`.
 - **ML-DSA:** secret-key unpacking, the NTT, `decompose` and `make_hint`.
 - **X25519:** the ladder and its output encoding.
+- **Falcon:** the integer floating-point operations along each rounding path, SamplerZ, key
+  expansion and signing.
 
 |t| > 4.5 on any percentile crop flags a timing difference. Run it on an idle machine with
 `julia --project=. test/timing/dudect.jl` (`DUDECT_N` sets the sample count, default 100,000).
-Fixed inputs are fresh copies, and the `decompose` and `make_hint` classes are both random,
-differing only in the branch a leak would follow: repeating identical data runs measurably faster
-on its own, on both Apple and Intel CPUs.
+Fixed inputs are fresh copies. Where repetition matters, both classes are random and differ only
+in the path a leak would follow, or two fixed keys are compared: repeating identical operands runs
+measurably faster on its own on both the Apple M5 and an Intel i7, even through branch-free code.
 
 `julia test/timing/dispatch.jl` (runs in CI; installs [JET](https://github.com/aviatesk/JET.jl)
 into a temporary environment) checks key generation, encapsulation, decapsulation and signing for
 ML-KEM and ML-DSA at every level, Falcon key expansion, X25519 and X-Wing for runtime dispatch. A
 boxed or type-unstable value on secret data makes timing depend on the value, which is how the
 X25519 encoding leaked; JET finds it without timing noise.
+
+### Falcon signing
+
+The signer does not use hardware floating point. Key expansion, the FFT, the ffLDL tree,
+ffSampling and SamplerZ run on Pornin's integer emulation of IEEE-754 binary64 (`fpr`, as in the
+reference implementation), with branch-free addition, multiplication, division, square root and
+rounding (`src/falcon/falcon_fpr.jl`). Each operation is bit-identical to hardware double
+precision on random operands, so the integer signer reproduces the 120 round-3 signatures bit for
+bit, and it matches the hardware floating-point signer, kept as a reference, on random keys at
+every degree. Signing takes about 2.6 ms for Falcon-512 on an Apple M5, six times the hardware
+floating-point signer.
 
 ## Installation
 

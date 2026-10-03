@@ -8,6 +8,7 @@ module FNDSA
 include("falcon/falcon_fft.jl")
 include("falcon/falcon_chacha.jl")
 include("falcon/falcon_sampler.jl")
+include("falcon/falcon_fpr.jl")
 include("falcon/falcon_ntrugen.jl")
 include("falcon/falcon_encoding.jl")
 include("falcon/falcon_certify.jl")

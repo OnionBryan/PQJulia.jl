@@ -18,7 +18,10 @@ for (lv, C) in ((44, MLDSA.Category2), (65, MLDSA.Category3), (87, MLDSA.Categor
                  ("ML-DSA-$lv unpack_sk", C.unpack_sk, (V,)))
 end
 for (lv, F) in ((512, FNDSA.Falcon512), (1024, FNDSA.Falcon1024))
-    push!(paths, ("Falcon-$lv expand_sk", F.falcon_expand_sk, (V,)))
+    EK = typeof(F.falcon_expand_sk(F.falcon_keygen()[2]))
+    push!(paths, ("Falcon-$lv expand_sk", F.falcon_expand_sk, (V,)),
+                 ("Falcon-$lv sign", F.falcon_sign, (V, EK)),
+                 ("Falcon-$lv MRM sign", F.falcon_mrm_sign, (Vector{Int}, V, EK)))
 end
 push!(paths, ("X25519", X25519.x25519, (V, V)),
              ("X-Wing decaps", XWing.xwing_decaps, (V, V)),

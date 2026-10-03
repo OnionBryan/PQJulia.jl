@@ -17,6 +17,7 @@ import ..FalconNTRUGen as NG
 import ..FalconEncoding as FE
 import ..FalconCertify as FC
 import ..FalconFxp as FX
+import ..FalconFpr as FP
 import ...Wipe: wipe!
 
 const q = 12289
@@ -286,13 +287,15 @@ end
 leaves(T, out=Float64[]) = T isa FFLeaf ? push!(out, T.σ) : (leaves(T.t0, out); leaves(T.t1, out))
 
 # (c, 0)·B₀⁻¹ in the FFT domain.
-function target(gs, c)
+function target(gs::NamedTuple, c)
     cf = FF.fft(Float64.(c))
     cf .* gs.b11 ./ q, .-cf .* gs.b01 ./ q
 end
+target(gs::FP.Setup, c) = FP.target(gs, c)
 
 # One ffSampling attempt: (s0, s1) = (c, 0) − z·B₀, so s0 + s1·h ≡ c (mod q).
-function preimage(gs, c, t0, t1, σmin, r)
+preimage(gs::FP.Setup, c, t0, t1, σmin, r) = FP.preimage(gs, c, t0, t1, σmin, r)
+function preimage(gs::NamedTuple, c, t0, t1, σmin, r)
     z0, z1 = ffsample(t0, t1, gs.T, σmin, r)
     v0 = round.(Int, real.(FF.ifft(z0 .* gs.b00 .+ z1 .* gs.b10)))
     v1 = round.(Int, real.(FF.ifft(z0 .* gs.b01 .+ z1 .* gs.b11)))
@@ -307,11 +310,14 @@ function sign_poly(sk, gs, msg::AbstractVector{UInt8}; randombytes=sysrandom)
     c = hash_to_point(msg, salt, n)
     t0, t1 = target(gs, c)
     while true
-        s0, s1 = preimage(gs, c, t0, t1, p.σmin, CC.ChaCha20(randombytes(SEED_LEN)))
+        seed = randombytes(SEED_LEN); r = CC.ChaCha20(seed)
+        s0, s1 = preimage(gs, c, t0, t1, p.σmin, r)
+        wipe!(seed); wipe!(r)
         norm2 = sum(abs2, s0) + sum(abs2, s1)
         norm2 <= p.β2 || continue
         enc = FE.compress(s1, (p.sigbytes - 1 - SALT_LEN) * 8)
         enc === nothing && continue
+        wipe!(t0, t1)
         return (; salt, s1, s0, norm2, enc)
     end
 end
@@ -430,11 +436,11 @@ function decode_sig(sigb::AbstractVector{UInt8}, n)
 end
 
 # ── Byte-level API ──────────────────────────────────────────────────────────
-struct ExpandedKey
-    sk::NamedTuple
-    gs::NamedTuple
+struct ExpandedKey{S<:NamedTuple}
+    sk::S
+    gs::FP.Setup                                   # integer-emulated signer (falcon_fpr.jl)
 end
-expand_sk(sk::NamedTuple) = ExpandedKey(sk, sign_setup(sk))
+expand_sk(sk::NamedTuple) = ExpandedKey(sk, FP.setup(sk, params(sk.n).σ, params(sk.n).σmin))
 function expand_sk(skb::AbstractVector{UInt8})
     sk = decode_sk(skb); sk === nothing && throw(ArgumentError("invalid Falcon secret key"))
     expand_sk(sk)
@@ -442,8 +448,7 @@ end
 wipe_sk!(sk) = (wipe!(sk.f, sk.g, sk.F, sk.G); sk)
 function wipe!(ek::ExpandedKey)
     wipe_sk!(ek.sk)
-    g = ek.gs
-    wipe!(g.b00, g.b01, g.b10, g.b11); wipe!(g.T)
+    wipe!(ek.gs)
     ek
 end
 

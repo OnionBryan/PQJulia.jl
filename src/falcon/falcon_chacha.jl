@@ -9,6 +9,8 @@
 # ============================================================================
 module FalconChaCha
 
+import ...Wipe: wipe!
+
 export ChaCha20, randbytes
 
 const CW = (0x61707865, 0x3320646e, 0x79622d32, 0x6b206574)
@@ -23,7 +25,7 @@ end
 function ChaCha20(seed::AbstractVector{UInt8})
     length(seed) == 56 || throw(ArgumentError("ChaCha20 seed must be 56 bytes"))
     s = ntuple(i -> UInt32(seed[4i-3]) | UInt32(seed[4i-2]) << 8 |
-                    UInt32(seed[4i-1]) << 16 | UInt32(seed[4i]) << 24, 14)
+                    UInt32(seed[4i-1]) << 16 | UInt32(seed[4i]) << 24, Val(14))
     ChaCha20(s, UInt64(s[13]) | UInt64(s[14]) << 32, UInt8[], 1)
 end
 
@@ -50,15 +52,21 @@ function block!(r::ChaCha20)
         qround!(x, 3, 8, 9, 14);  qround!(x, 4, 5, 10, 15)
     end
     r.ctr += 1
-    x .+ st
+    x .+= st
+    wipe!(st)
+    x
 end
 
 function refill!(r::ChaCha20)
     words = Vector{UInt32}(undef, 128)
     for i in 1:8
-        words[i:8:end] = block!(r)
+        blk = block!(r)
+        words[i:8:end] = blk
+        wipe!(blk)
     end
+    wipe!(r.buf)
     r.buf = collect(reinterpret(UInt8, htol.(words))); r.pos = 1
+    wipe!(words)
 end
 
 function randbytes(r::ChaCha20, k::Int)
@@ -66,5 +74,7 @@ function randbytes(r::ChaCha20, k::Int)
     out = r.buf[r.pos:r.pos+k-1]; r.pos += k
     out
 end
+
+wipe!(r::ChaCha20) = (r.s = ntuple(_ -> UInt32(0), Val(14)); r.ctr = 0; wipe!(r.buf); r)
 
 end # module
