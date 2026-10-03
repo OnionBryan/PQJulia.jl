@@ -30,6 +30,8 @@ constant-time code is not guaranteed to stay constant-time after compilation.
 | `kyber_poly_tomsg!` | Barrett multiply-shift, no division | kyber_core.jl |
 | `kyber_poly_compress!` | Barrett multiply-shift (80635>>28, 40318>>27) | kyber_core.jl |
 | ML-KEM Decaps rejection | Always computes both paths, `cmov` selects | kyber_kem.jl |
+| `decompose` (ML-DSA) | Multiply-shift, no division (RUSTSEC-2025-0144 does not apply); GAMMA2 branches are on public constants | dilithium_level.jl |
+| `make_hint` (ML-DSA) | Bitwise `\|`/`&` comparisons; compiles to `setcc`/`csel`, no branches, on x86-64 and AArch64 | dilithium_level.jl |
 | X25519 | Scalar bits from 64-bit words, mask swaps on 51-bit limbs, branch-free canonical encoding | x25519.jl |
 
 ### Variable-time
@@ -37,7 +39,8 @@ constant-time code is not guaranteed to stay constant-time after compilation.
 | Operation | Note |
 |-----------|------|
 | Julia GC pauses, JIT compilation | First call compiles; warm up before timing-sensitive use |
-| `decompose` (ML-DSA) | Multiply-shift on secret data (no UDIV); GAMMA2 branches are public constants. RUSTSEC-2025-0144 does not apply |
+| `poly_uniform_eta!` (ML-DSA keygen) | Rejection sampling, as in the reference: timing shows which bytes were rejected, and those are independent of the kept coefficients |
+| Matrix expansion (ML-KEM, ML-DSA) | Rejection sampling on the public seed ρ |
 | SHAKE (SHA.jl) | Timing depends on input length, which is public |
 | Falcon signing (ffSampling, SamplerZ) | Floating-point FFT and Gaussian sampling on secret data |
 | Falcon keygen (NTRU solver) | BigInt arithmetic; `fixedpoint=true` removes floating point (ePrint 2023/290) |
@@ -61,6 +64,8 @@ constant-time code is not guaranteed to stay constant-time after compilation.
 | ML-DSA signing accepted secret keys with s1/s2 outside [−η, η] | Wycheproof `InvalidPrivateKey` | Fixed — rejected |
 | Falcon FFT lost ~8 bits of the 53-bit mantissa (naive O(n²) power accumulation) | Comparison against a 256-bit reference ffLDL tree | Fixed — split/merge FFT with exactly-rounded roots |
 | X25519 decoded the scalar and encoded the shared secret through BigInt (GMP), whose timing depends on the value (dudect \|t\| ≈ 20 on Apple M5 and Intel Broadwell) | `test/timing/dudect.jl` | Fixed — 64-bit word arithmetic, no BigInt on secret data; type-stable, so no value-dependent boxing |
+| ML-DSA keygen boxed the rejection counter of `poly_uniform_eta!` (a nested function reassigned an enclosing variable), so it ran through runtime dispatch on secret-derived data | `test/timing/dispatch.jl` (JET) | Fixed — top-level `rej_eta!`; type-stable |
+| `make_hint` compiled to conditional branches on x86-64 | Disassembly after a dudect flag (\|t\| 7.4, Intel i7-8086K) | Fixed — bitwise form, branch-free |
 | Falcon signed with any key whose ffLDL leaves passed the GS-norm test only on paper | NIST FIPS 206 status update (Oct 2025) | Fixed — signing refuses keys with a leaf outside [σmin, σmax]; `falcon_keygen(certified=true)` and `falcon_certify` decide the leaf and GS-norm bounds exactly |
 
 ## Falcon Key Certificate

@@ -12,8 +12,9 @@ function decompose(a::Int32)
     return a1, a0
 end
 
+# Bitwise, not ||: x86 compiles the short-circuit form to branches.
 function make_hint(a0::Int32, a1::Int32)::Bool
-    return a0 > GAMMA2 || a0 < -GAMMA2 || (a0 == -GAMMA2 && a1 != 0)
+    return (a0 > GAMMA2) | (a0 < -GAMMA2) | ((a0 == -GAMMA2) & (a1 != 0))
 end
 
 function use_hint(a::Int32, hint::Bool)::Int32
@@ -26,6 +27,38 @@ function use_hint(a::Int32, hint::Bool)::Int32
     end
 end
 
+# Rejection sampling, C ref rej_eta.
+function rej_eta!(a, offset, len, buf, buflen)
+    ctr = 0; pos = 1
+    while ctr < len && pos <= buflen
+        t0 = UInt32(buf[pos]) & 0x0F
+        t1 = UInt32(buf[pos]) >> 4
+        pos += 1
+        if ETA == 2
+            if t0 < 15
+                t0 = t0 - ((205*t0) >> 10)*5
+                a[offset + ctr + 1] = Int32(2) - Int32(t0)
+                ctr += 1
+            end
+            if t1 < 15 && ctr < len
+                t1 = t1 - ((205*t1) >> 10)*5
+                a[offset + ctr + 1] = Int32(2) - Int32(t1)
+                ctr += 1
+            end
+        elseif ETA == 4
+            if t0 < 9
+                a[offset + ctr + 1] = Int32(4) - Int32(t0)
+                ctr += 1
+            end
+            if t1 < 9 && ctr < len
+                a[offset + ctr + 1] = Int32(4) - Int32(t1)
+                ctr += 1
+            end
+        end
+    end
+    return ctr
+end
+
 function poly_uniform_eta!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
     # SHAKE256(seed || nonce_le16) with re-squeeze loop (C ref: poly.c:435-453)
     # SHAKE256_RATE = 136; initial blocks: eta=2 → 1 block (136B), eta=4 → 2 blocks (272B)
@@ -33,50 +66,14 @@ function poly_uniform_eta!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
     nblocks_init = ETA == 2 ? 1 : 2
     total_out = nblocks_init * 136
     buf = SHA.shake256(input, UInt64(total_out))
-    buflen = total_out
-
-    # Rejection sampling helper (inline, matches C rej_eta)
-    function rej_pass(buf, buflen, a, offset, len)
-        ctr = 0; pos = 1
-        while ctr < len && pos <= buflen
-            t0 = UInt32(buf[pos]) & 0x0F
-            t1 = UInt32(buf[pos]) >> 4
-            pos += 1
-            if ETA == 2
-                if t0 < 15
-                    t0 = t0 - ((205*t0) >> 10)*5
-                    a[offset + ctr + 1] = Int32(2) - Int32(t0)
-                    ctr += 1
-                end
-                if t1 < 15 && ctr < len
-                    t1 = t1 - ((205*t1) >> 10)*5
-                    a[offset + ctr + 1] = Int32(2) - Int32(t1)
-                    ctr += 1
-                end
-            elseif ETA == 4
-                if t0 < 9
-                    a[offset + ctr + 1] = Int32(4) - Int32(t0)
-                    ctr += 1
-                end
-                if t1 < 9 && ctr < len
-                    a[offset + ctr + 1] = Int32(4) - Int32(t1)
-                    ctr += 1
-                end
-            end
-        end
-        return ctr
-    end
-
-    # First pass
-    ctr = rej_pass(buf, buflen, a, 0, N)
+    ctr = rej_eta!(a, 0, N, buf, total_out)
 
     # Re-squeeze loop: one SHAKE256 block at a time
     while ctr < N
         new_total = total_out + 136
-        full_stream = SHA.shake256(input, UInt64(new_total))
-        buf = full_stream[total_out+1:new_total]
+        blk = SHA.shake256(input, UInt64(new_total))[total_out+1:new_total]
         total_out = new_total
-        ctr += rej_pass(buf, 136, a, ctr, N - ctr)
+        ctr += rej_eta!(a, ctr, N - ctr, blk, 136)
     end
 
     return a

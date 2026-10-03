@@ -57,15 +57,23 @@ accepted by the other, and so are secret keys used for signing.
 
 `test/timing/dudect.jl` (opt-in) runs the fixed-vs-random Welch t-test of
 [dudect](https://eprint.iacr.org/2016/1069) on the functions [SECURITY.md](SECURITY.md) lists as
-constant-time: ML-KEM decapsulation of valid and tampered ciphertexts, `kyber_verify`,
-`kyber_cmov!`, the X25519 ladder and its output encoding. |t| > 4.5 on any percentile crop flags
-a timing difference. Run it on an idle machine with `julia --project=. test/timing/dudect.jl`
-(`DUDECT_N` sets the sample count, default 100,000).
+constant-time and on secret-key paths:
+- **ML-KEM:** decapsulation of valid and tampered ciphertexts, encapsulation, noise sampling with
+  the NTT, `kyber_verify` and `kyber_cmov!`.
+- **ML-DSA:** secret-key unpacking, the NTT, `decompose` and `make_hint`.
+- **X25519:** the ladder and its output encoding.
 
-`julia test/timing/dispatch.jl` (opt-in; installs [JET](https://github.com/aviatesk/JET.jl) into a
-temporary environment) checks ML-KEM, X25519 and X-Wing for runtime dispatch. A boxed or
-type-unstable value on secret data makes timing depend on the value, which is how the X25519
-encoding leaked; JET finds it without timing noise.
+|t| > 4.5 on any percentile crop flags a timing difference. Run it on an idle machine with
+`julia --project=. test/timing/dudect.jl` (`DUDECT_N` sets the sample count, default 100,000).
+Fixed inputs are fresh copies, and the `decompose` and `make_hint` classes are both random,
+differing only in the branch a leak would follow: repeating identical data runs measurably faster
+on its own, on both Apple and Intel CPUs.
+
+`julia test/timing/dispatch.jl` (runs in CI; installs [JET](https://github.com/aviatesk/JET.jl)
+into a temporary environment) checks key generation, encapsulation, decapsulation and signing for
+ML-KEM and ML-DSA at every level, Falcon key expansion, X25519 and X-Wing for runtime dispatch. A
+boxed or type-unstable value on secret data makes timing depend on the value, which is how the
+X25519 encoding leaked; JET finds it without timing noise.
 
 ## Installation
 

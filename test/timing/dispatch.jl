@@ -5,14 +5,25 @@ Pkg.develop(path=dirname(dirname(@__DIR__)); io=devnull)
 Pkg.add("JET"; io=devnull)
 using PQJulia, JET
 
-C = MLKEM.Category3
-paths = [
-    ("ML-KEM-768 decaps", C.kyber_kem_dec, (Vector{UInt8}, Vector{UInt8})),
-    ("ML-KEM-768 encaps", C.kyber_kem_enc, (Vector{UInt8},)),
-    ("X25519", X25519.x25519, (Vector{UInt8}, Vector{UInt8})),
-    ("X-Wing decaps", XWing.xwing_decaps, (Vector{UInt8}, Vector{UInt8})),
-    ("X-Wing encaps", XWing.xwing_encaps, (Vector{UInt8},)),
-]
+V = Vector{UInt8}
+paths = Any[]
+for (lv, C) in ((512, MLKEM.Category1), (768, MLKEM.Category3), (1024, MLKEM.Category5))
+    push!(paths, ("ML-KEM-$lv keygen", C.kyber_kem_keypair_derand, (V,)),
+                 ("ML-KEM-$lv encaps", C.kyber_kem_enc_derand, (V, V)),
+                 ("ML-KEM-$lv decaps", C.kyber_kem_dec, (V, V)))
+end
+for (lv, C) in ((44, MLDSA.Category2), (65, MLDSA.Category3), (87, MLDSA.Category5))
+    push!(paths, ("ML-DSA-$lv keygen", C.dilithium_keygen_derand, (V,)),
+                 ("ML-DSA-$lv sign", C.dilithium_sign_derand, (V, V, V)),
+                 ("ML-DSA-$lv unpack_sk", C.unpack_sk, (V,)))
+end
+for (lv, F) in ((512, FNDSA.Falcon512), (1024, FNDSA.Falcon1024))
+    push!(paths, ("Falcon-$lv expand_sk", F.falcon_expand_sk, (V,)))
+end
+push!(paths, ("X25519", X25519.x25519, (V, V)),
+             ("X-Wing decaps", XWing.xwing_decaps, (V, V)),
+             ("X-Wing encaps", XWing.xwing_encaps, (V,)))
+
 bad = 0
 for (name, f, T) in paths
     n = length(JET.get_reports(report_opt(f, T)))
