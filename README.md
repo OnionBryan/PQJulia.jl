@@ -53,6 +53,15 @@ Everything below runs in CI (`Pkg.test()`):
 liboqs 0.15 for every scheme. Keys, signatures and ciphertexts produced by either side are
 accepted by the other, and so are secret keys used for signing.
 
+### Timing test
+
+`test/timing/dudect.jl` (opt-in) runs the fixed-vs-random Welch t-test of
+[dudect](https://eprint.iacr.org/2016/1069) on the functions [SECURITY.md](SECURITY.md) lists as
+constant-time: ML-KEM decapsulation of valid and tampered ciphertexts, `kyber_verify`,
+`kyber_cmov!`, the X25519 ladder and its output encoding. |t| > 4.5 on any percentile crop flags
+a timing difference. Run it on an idle machine: `julia --project=. test/timing/dudect.jl` (`DUDECT_N` sets the sample
+count, default 100,000).
+
 ## Installation
 
 ```julia

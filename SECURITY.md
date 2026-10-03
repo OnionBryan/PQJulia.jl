@@ -30,7 +30,7 @@ constant-time code is not guaranteed to stay constant-time after compilation.
 | `kyber_poly_tomsg!` | Barrett multiply-shift, no division | kyber_core.jl |
 | `kyber_poly_compress!` | Barrett multiply-shift (80635>>28, 40318>>27) | kyber_core.jl |
 | ML-KEM Decaps rejection | Always computes both paths, `cmov` selects | kyber_kem.jl |
-| X25519 ladder | Mask swaps on 51-bit limbs | x25519.jl |
+| X25519 | Scalar bits from 64-bit words, mask swaps on 51-bit limbs, branch-free canonical encoding | x25519.jl |
 
 ### Variable-time
 
@@ -40,7 +40,6 @@ constant-time code is not guaranteed to stay constant-time after compilation.
 | `decompose` (ML-DSA) | Multiply-shift on secret data (no UDIV); GAMMA2 branches are public constants. RUSTSEC-2025-0144 does not apply |
 | SHAKE (SHA.jl) | Timing depends on input length, which is public |
 | Falcon signing (ffSampling, SamplerZ) | Floating-point FFT and Gaussian sampling on secret data |
-| X25519 scalar decode, final inversion and encoding | BigInt arithmetic |
 | Falcon keygen (NTRU solver) | BigInt arithmetic; `fixedpoint=true` removes floating point (ePrint 2023/290) |
 
 ## Known Issues Addressed
@@ -61,6 +60,7 @@ constant-time code is not guaranteed to stay constant-time after compilation.
 | ML-DSA Verify threw on context > 255 bytes and on malformed keys | FIPS 204 Alg. 3 | Fixed — returns false |
 | ML-DSA signing accepted secret keys with s1/s2 outside [−η, η] | Wycheproof `InvalidPrivateKey` | Fixed — rejected |
 | Falcon FFT lost ~8 bits of the 53-bit mantissa (naive O(n²) power accumulation) | Comparison against a 256-bit reference ffLDL tree | Fixed — split/merge FFT with exactly-rounded roots |
+| X25519 decoded the scalar and encoded the shared secret through BigInt (GMP), whose timing depends on the value (dudect \|t\| ≈ 20 on M1 and Broadwell) | `test/timing/dudect.jl` | Fixed — 64-bit word arithmetic, no BigInt on secret data; type-stable, so no value-dependent boxing |
 | Falcon signed with any key whose ffLDL leaves passed the GS-norm test only on paper | NIST FIPS 206 status update (Oct 2025) | Fixed — signing refuses keys with a leaf outside [σmin, σmax]; `falcon_keygen(certified=true)` and `falcon_certify` decide the leaf and GS-norm bounds exactly |
 
 ## Falcon Key Certificate

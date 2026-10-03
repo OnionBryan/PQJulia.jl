@@ -13,6 +13,7 @@ const P = big(2)^255 - 19
 const A24 = 121665
 const BASE = vcat(UInt8(9), zeros(UInt8, 31))
 const M51 = (UInt64(1) << 51) - 1
+const LOW63 = 0x7fffffffffffffff
 
 # ── GF(2²⁵⁵ − 19) in five 51-bit limbs; every operation returns carried limbs ──
 const Fe = NTuple{5,UInt64}
@@ -45,15 +46,55 @@ function fe_mul(a::Fe, b::Fe)
 end
 fe_sq(a::Fe) = fe_mul(a, a)
 
-function fe_pow(a::Fe, e::BigInt)
+const PM2_BITS = reverse(digits(Bool, P - 2, base=2))   # public exponent, MSB first
+
+function fe_inv(a::Fe)
     r = (UInt64(1), UInt64(0), UInt64(0), UInt64(0), UInt64(0))
-    for i in ndigits(e, base=2)-1:-1:0
+    for b in PM2_BITS
         r = fe_sq(r)
-        isodd(e >> i) && (r = fe_mul(r, a))
+        b && (r = fe_mul(r, a))
     end
     r
 end
-fe_inv(a::Fe) = fe_pow(a, P - 2)
+
+# Four little-endian 64-bit words of the limb value (limbs < 2⁵², so it fits).
+function fe_words(a::Fe)
+    acc = UInt128(a[1]) + (UInt128(a[2]) << 51)
+    w0 = acc % UInt64; acc >>= 64
+    acc += UInt128(a[3]) << 38
+    w1 = acc % UInt64; acc >>= 64
+    acc += UInt128(a[4]) << 25
+    w2 = acc % UInt64; acc >>= 64
+    acc += UInt128(a[5]) << 12
+    w3 = acc % UInt64
+    (w0, w1, w2, w3), (acc >> 64) % UInt64
+end
+
+# w + 19k over four words; the caller keeps the sum below 2²⁵⁶.
+function add19(w::NTuple{4,UInt64}, k::UInt64)
+    c = UInt128(w[1]) + 19 * UInt128(k); r0 = c % UInt64
+    c = UInt128(w[2]) + (c >> 64);       r1 = c % UInt64
+    c = UInt128(w[3]) + (c >> 64);       r2 = c % UInt64
+    c = UInt128(w[4]) + (c >> 64);       r3 = c % UInt64
+    (r0, r1, r2, r3)
+end
+
+# Canonical 32-byte encoding, branch-free: fold 2²⁵⁵ ≡ 19 twice, then subtract p if v ≥ p.
+# Single assignments: a reassigned captured variable gets boxed.
+function fe_tobytes(a::Fe)
+    w0, over = fe_words(a)
+    w1 = add19((w0[1], w0[2], w0[3], w0[4] & LOW63), (w0[4] >> 63) | (over << 1))
+    w2 = add19((w1[1], w1[2], w1[3], w1[4] & LOW63), w1[4] >> 63)
+    c = add19(w2, UInt64(1))                 # v + 19 ≥ 2²⁵⁵ ⇔ v ≥ p
+    m = -(c[4] >> 63)
+    r = map((ci, wi) -> (m & ci) | (~m & wi), c, w2)
+    out = Vector{UInt8}(undef, 32)
+    for i in 0:31
+        out[i+1] = (r[(i >> 3) + 1] >> (8 * (i & 7))) % UInt8
+    end
+    out[32] &= 0x7f
+    out
+end
 
 # Little-endian 32 bytes; the top bit is masked (RFC 7748 §5); values in [p, 2²⁵⁵) are accepted.
 function fe_frombytes(b::AbstractVector{UInt8})
@@ -62,11 +103,16 @@ function fe_frombytes(b::AbstractVector{UInt8})
     (w[1] & M51, ((w[1] >> 51) | (w[2] << 13)) & M51, ((w[2] >> 38) | (w[3] << 26)) & M51,
      ((w[3] >> 25) | (w[4] << 39)) & M51, w[4] >> 12)
 end
-fe_tobig(a::Fe) = mod(sum(big(a[i]) << (51 * (i - 1)) for i in 1:5), P)
 tobytes(x::BigInt) = UInt8[(x >> (8i)) & 0xff for i in 0:31]
 
 cswap(s::UInt64, a::Fe, b::Fe) = (m = -s; d = ntuple(i -> m & (a[i] ⊻ b[i]), 5);
                                    (ntuple(i -> a[i] ⊻ d[i], 5), ntuple(i -> b[i] ⊻ d[i], 5)))
+
+# decodeScalar25519 (RFC 7748 §5) as four little-endian 64-bit words.
+function clamp_words(k::AbstractVector{UInt8})
+    w = ntuple(i -> reduce(|, UInt64(k[8(i-1)+j+1]) << (8j) for j in 0:7), 4)
+    (w[1] & ~UInt64(7), w[2], w[3], (w[4] & 0x7fffffffffffffff) | 0x4000000000000000)
+end
 
 # decodeScalar25519 (RFC 7748 §5).
 function clamp_scalar(k::AbstractVector{UInt8})
@@ -79,13 +125,13 @@ check32(v, what) = length(v) == 32 || throw(ArgumentError("X25519 $what must be 
 "X25519(k, u) (RFC 7748 §5): the u-coordinate of [k]·u, as 32 little-endian bytes."
 function x25519(k::AbstractVector{UInt8}, u::AbstractVector{UInt8})
     check32(k, "scalar"); check32(u, "u-coordinate")
-    s = clamp_scalar(k)
+    s = clamp_words(k)
     x1 = fe_frombytes(u)
     one = (UInt64(1), UInt64(0), UInt64(0), UInt64(0), UInt64(0)); zero = (UInt64(0), UInt64(0), UInt64(0), UInt64(0), UInt64(0))
     x2, z2, x3, z3 = one, zero, x1, one
     swap = UInt64(0)
     for t in 254:-1:0
-        kt = UInt64((s >> t) & 1)
+        kt = (s[(t >> 6) + 1] >> (t & 63)) & 1
         swap ⊻= kt
         x2, x3 = cswap(swap, x2, x3); z2, z3 = cswap(swap, z2, z3)
         swap = kt
@@ -100,7 +146,7 @@ function x25519(k::AbstractVector{UInt8}, u::AbstractVector{UInt8})
         z2 = fe_mul(E, fe_add(AA, fe_small(E, UInt64(A24))))
     end
     x2, x3 = cswap(swap, x2, x3); z2, z3 = cswap(swap, z2, z3)
-    tobytes(fe_tobig(fe_mul(x2, fe_inv(z2))))
+    fe_tobytes(fe_mul(x2, fe_inv(z2)))
 end
 
 "RFC 7748 §5 pseudocode over BigInt: the reference the limb engine is tested against."
