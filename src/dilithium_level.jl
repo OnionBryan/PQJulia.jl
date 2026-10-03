@@ -71,17 +71,22 @@ function poly_uniform_eta!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
     # Re-squeeze loop: one SHAKE256 block at a time
     while ctr < N
         new_total = total_out + 136
-        blk = SHA.shake256(input, UInt64(new_total))[total_out+1:new_total]
+        full = SHA.shake256(input, UInt64(new_total))
+        blk = full[total_out+1:new_total]
         total_out = new_total
         ctr += rej_eta!(a, ctr, N - ctr, blk, 136)
+        wipe!(full, blk)
     end
+    wipe!(input, buf)
 
     return a
 end
 
 function poly_uniform_gamma1!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
-    buf = SHA.shake256(vcat(seed, UInt8[nonce & 0xff, (nonce >> 8) & 0xff]), UInt64(POLYZ_PACKED))
+    input = vcat(seed, UInt8[nonce & 0xff, (nonce >> 8) & 0xff])
+    buf = SHA.shake256(input, UInt64(POLYZ_PACKED))
     polyz_unpack!(a, buf)
+    wipe!(input, buf)
     return a
 end
 
@@ -149,7 +154,7 @@ function polyeta_pack(a::Vector{Int32})::Vector{UInt8}
         end
     elseif ETA == 2
         for i in 0:(N÷8 - 1)
-            t = [(ETA - a[8i+j+1]) % UInt8 for j in 0:7]
+            t = ntuple(j -> (ETA - a[8i+j]) % UInt8, 8)
             r[3i+1] = t[1] | (t[2] << 3) | (t[3] << 6)
             r[3i+2] = (t[3] >> 2) | (t[4] << 1) | (t[5] << 4) | (t[6] << 7)
             r[3i+3] = (t[6] >> 1) | (t[7] << 2) | (t[8] << 5)
@@ -158,7 +163,7 @@ function polyeta_pack(a::Vector{Int32})::Vector{UInt8}
     return r
 end
 
-function polyeta_unpack!(r::Vector{Int32}, a::Vector{UInt8})
+function polyeta_unpack!(r::Vector{Int32}, a::AbstractVector{UInt8})
     if ETA == 4
         for i in 0:(N÷2 - 1)
             r[2i+1] = Int32(ETA) - Int32(a[i+1] & 0x0F)
@@ -255,7 +260,7 @@ function polyt0_pack(a::Vector{Int32})::Vector{UInt8}
     # 13-bit packing: 8 coefficients → 13 bytes. C ref: packing.c:664-702
     r = zeros(UInt8, POLYT0_PACKED)
     for i in 0:(N÷8 - 1)
-        ts = [UInt32((1 << (D-1)) - a[8i+k]) for k in 1:8]
+        ts = ntuple(k -> UInt32((1 << (D-1)) - a[8i+k]), 8)
         r[13i+1]  = (ts[1]) % UInt8
         r[13i+2]  = ((ts[1] >> 8) | (ts[2] << 5)) % UInt8
         r[13i+3]  = (ts[2] >> 3) % UInt8
@@ -272,7 +277,7 @@ function polyt0_pack(a::Vector{Int32})::Vector{UInt8}
     end
     return r
 end
-function polyt0_unpack!(r::Vector{Int32}, a::Vector{UInt8})
+function polyt0_unpack!(r::Vector{Int32}, a::AbstractVector{UInt8})
     # 13-bit unpacking: 13 bytes → 8 coefficients. C ref: packing.c:712-763
     for i in 0:(N÷8 - 1)
         r[8i+1] = Int32(UInt32(a[13i+1]) | (UInt32(a[13i+2]) << 8)) & Int32(0x1FFF)
@@ -291,8 +296,8 @@ end
 
 function dilithium_keygen_derand(xi::Vector{UInt8})
     length(xi) == SEEDBYTES || throw(ArgumentError("keygen seed must be $SEEDBYTES bytes"))
-    seed = xi[1:SEEDBYTES]
-    expanded = SHA.shake256(vcat(seed, UInt8[K, L]), UInt64(2*SEEDBYTES + CRHBYTES))
+    seed = vcat(xi, UInt8[K, L])
+    expanded = SHA.shake256(seed, UInt64(2*SEEDBYTES + CRHBYTES))
     rho = expanded[1:SEEDBYTES]
     rhoprime = expanded[SEEDBYTES+1:SEEDBYTES+CRHBYTES]
     key = expanded[SEEDBYTES+CRHBYTES+1:2*SEEDBYTES+CRHBYTES]
@@ -348,18 +353,26 @@ function dilithium_keygen_derand(xi::Vector{UInt8})
     tr = SHA.shake256(pk, UInt64(TRBYTES))
 
     # Pack sk = rho || key || tr || s1 || s2 || t0
-    sk = vcat(rho, key, tr)
-    for i in 1:L; append!(sk, polyeta_pack(s1[i])); end
-    for i in 1:K; append!(sk, polyeta_pack(s2[i])); end
-    for i in 1:K
-        append!(sk, polyt0_pack(t0[i]))
+    sk = append!(sizehint!(UInt8[], SK_BYTES), rho, key, tr)   # no regrowth copies
+    for i in 1:L
+        e = polyeta_pack(s1[i]); append!(sk, e); wipe!(e)
     end
+    for i in 1:K
+        e = polyeta_pack(s2[i]); append!(sk, e); wipe!(e)
+    end
+    for i in 1:K
+        e = polyt0_pack(t0[i]); append!(sk, e); wipe!(e)
+    end
+    wipe!(seed, expanded, rhoprime, key, s1, s2, s1hat, t, t0, tmp)
 
     return pk, sk
 end
 
 function dilithium_keygen()
-    return dilithium_keygen_derand(rand(RandomDevice(), UInt8, SEEDBYTES))
+    xi = rand(RandomDevice(), UInt8, SEEDBYTES)
+    kp = dilithium_keygen_derand(xi)
+    wipe!(xi)
+    return kp
 end
 
 # ==================== SIGN ====================
@@ -372,15 +385,15 @@ function unpack_sk(sk::Vector{UInt8})
 
     s1 = [zeros(Int32, N) for _ in 1:L]
     for i in 1:L
-        polyeta_unpack!(s1[i], sk[pos:pos+POLYETA_PACKED-1]); pos += POLYETA_PACKED
+        polyeta_unpack!(s1[i], view(sk, pos:pos+POLYETA_PACKED-1)); pos += POLYETA_PACKED
     end
     s2 = [zeros(Int32, N) for _ in 1:K]
     for i in 1:K
-        polyeta_unpack!(s2[i], sk[pos:pos+POLYETA_PACKED-1]); pos += POLYETA_PACKED
+        polyeta_unpack!(s2[i], view(sk, pos:pos+POLYETA_PACKED-1)); pos += POLYETA_PACKED
     end
     t0 = [zeros(Int32, N) for _ in 1:K]
     for i in 1:K
-        polyt0_unpack!(t0[i], sk[pos:pos+POLYT0_PACKED-1]); pos += POLYT0_PACKED
+        polyt0_unpack!(t0[i], view(sk, pos:pos+POLYT0_PACKED-1)); pos += POLYT0_PACKED
     end
     return rho, key, tr, s1, s2, t0
 end
@@ -419,6 +432,7 @@ function compute_w!(w1::Vector{Vector{Int32}}, w0::Vector{Vector{Int32}}, A::Mat
             w1[i][j], w0[i][j] = decompose(w1[i][j])
         end
     end
+    wipe!(zy)
 end
 
 function compute_challenge(mu::Vector{UInt8}, w1::Vector{Vector{Int32}}, cp::Vector{Int32})
@@ -524,7 +538,8 @@ function sign_mu(mu::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8})
     for i in 1:K; ntt!(s2[i]); end
     for i in 1:K; ntt!(t0[i]); end
 
-    rhoprime = SHA.shake256(vcat(key, rnd, mu), UInt64(CRHBYTES))
+    kin = vcat(key, rnd, mu)
+    rhoprime = SHA.shake256(kin, UInt64(CRHBYTES))
 
     nonce = 0  # Int, not UInt16 — avoids overflow at 9362 iterations for L=7 (pq-crystals/dilithium#110)
     y = [zeros(Int32, N) for _ in 1:L]
@@ -548,7 +563,9 @@ function sign_mu(mu::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8})
         if make_hints_and_check!(h, w0, w1, cp_hat, t0)
             nonce += 1; continue
         end
-        return pack_signature(c_tilde, z, h)
+        sig = pack_signature(c_tilde, z, h)
+        wipe!(key, s1, s2, t0, kin, rhoprime, y, z, w1, w0, h, tmp)
+        return sig
     end
 end
 
@@ -580,7 +597,9 @@ end
 """ML-DSA.Sign (FIPS 204 Alg. 2). Hedged by default (rnd from the OS CSPRNG); `hedged=false` is the deterministic variant."""
 function dilithium_sign(msg::Vector{UInt8}, sk::Vector{UInt8}; hedged::Bool=true, context::Vector{UInt8}=UInt8[])
     rnd = hedged ? rand(RandomDevice(), UInt8, 32) : zeros(UInt8, 32)
-    return dilithium_sign_derand(msg, sk, rnd; context=context)
+    sig = dilithium_sign_derand(msg, sk, rnd; context=context)
+    wipe!(rnd)
+    return sig
 end
 
 # ==================== VERIFY ====================
@@ -751,7 +770,9 @@ end
 function dilithium_sign_prehash(msg::Vector{UInt8}, sk::Vector{UInt8}, hash_alg::String;
                                 hedged::Bool=true, context::Vector{UInt8}=UInt8[])
     rnd = hedged ? rand(RandomDevice(), UInt8, 32) : zeros(UInt8, 32)
-    return dilithium_sign_prehash_derand(msg, sk, hash_alg, rnd; context=context)
+    sig = dilithium_sign_prehash_derand(msg, sk, hash_alg, rnd; context=context)
+    wipe!(rnd)
+    return sig
 end
 
 """HashML-DSA.Verify (FIPS 204 Alg. 5). A context over 255 bytes is rejected (returns false)."""

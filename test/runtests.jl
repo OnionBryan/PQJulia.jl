@@ -154,6 +154,7 @@ include("vectors_extra.jl")
 # ==================== X25519 and X-Wing ====================
 
 include("x25519_xwing.jl")
+include("wipe.jl")
 
 @testset "FN-DSA API ($(M.IDENTIFIER))" for M in (FNDSA.Falcon512, FNDSA.Falcon1024)
     pk, sk = M.falcon_keygen()

@@ -37,6 +37,10 @@ FNDSA.Falcon512.falcon_verify(msg, sig, pk)  # true
 """
 module PQJulia
 
+include("wipe.jl")
+using .Wipe
+export wipe!
+
 # ML-KEM (FIPS 203) — Kyber Key Encapsulation
 include("mlkem.jl")
 using .MLKEM

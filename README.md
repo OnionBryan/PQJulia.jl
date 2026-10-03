@@ -111,6 +111,8 @@ sig = FNDSA.Falcon512.falcon_sign(msg, sk)
 FNDSA.Falcon512.falcon_verify(msg, sig, pk)   # true
 ek = FNDSA.Falcon512.falcon_expand_sk(sk)     # decode once, then sign many messages fast
 sig = FNDSA.Falcon512.falcon_sign(msg, ek)
+FNDSA.Falcon512.falcon_wipe!(ek)              # zero the expanded key when done
+wipe!(sk)                                     # zero any secret buffer you own
 pk, sk = FNDSA.Falcon512.falcon_keygen(certified=true)   # only keys with an exact certificate
 FNDSA.Falcon512.falcon_certify(sk).ok                    # true: leaves in [σmin, σmax], GS norm ≤ 1.17√q
 pk, sk = FNDSA.Falcon512.falcon_keygen(fixedpoint=true)  # no floating point in keygen (ePrint 2023/290)

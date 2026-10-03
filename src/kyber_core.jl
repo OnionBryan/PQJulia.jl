@@ -218,7 +218,10 @@ end
 
 """PRF: SHAKE-256(seed || nonce, outlen)"""
 function kyber_prf(seed::Vector{UInt8}, nonce::UInt8, outlen::Int)
-    return SHA.shake256(vcat(seed, UInt8[nonce]), UInt64(outlen))
+    inp = vcat(seed, UInt8[nonce])
+    out = SHA.shake256(inp, UInt64(outlen))
+    wipe!(inp)
+    return out
 end
 
 """XOF: SHAKE-128(seed, outlen)"""
@@ -642,6 +645,7 @@ Sample noise polynomial with eta=2 from PRF(seed, nonce).
 function kyber_poly_getnoise_eta2!(r::Vector{Int16}, seed::Vector{UInt8}, nonce::UInt8)
     buf = kyber_prf(seed, nonce, 2 * KYBER_N ÷ 4)   # eta2*N/4 = 128 bytes
     kyber_cbd2!(r, buf)
+    wipe!(buf)
     return r
 end
 
@@ -661,6 +665,7 @@ function kyber_poly_getnoise_eta1!(r::Vector{Int16}, seed::Vector{UInt8},
     else
         error("eta1 must be 2 or 3, got $eta1")
     end
+    wipe!(buf)
     return r
 end
 

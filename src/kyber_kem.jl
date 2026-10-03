@@ -2,7 +2,10 @@
 # Mirrors symmetric-shake.c:kyber_shake256_rkprf
 
 function kyber_rkprf(key::Vector{UInt8}, input::Vector{UInt8})
-    return SHA.shake256(vcat(key, input), UInt64(KYBER_SSBYTES))
+    inp = vcat(key, input)
+    out = SHA.shake256(inp, UInt64(KYBER_SSBYTES))
+    wipe!(inp)
+    return out
 end
 
 # ── Polyvec Serialization ────────────────────────────────────────────────────
@@ -242,7 +245,7 @@ function kyber_indcpa_keypair_derand(coins::Vector{UInt8})
     k = KYBER_K
 
     # buf = coins || KYBER_K byte, then hash_g on 33 bytes
-    buf_in = vcat(coins[1:KYBER_SYMBYTES], UInt8[UInt8(k)])
+    buf_in = vcat(view(coins, 1:KYBER_SYMBYTES), UInt8[UInt8(k)])
     buf = kyber_hash_g(buf_in)  # 64 bytes
     rho = buf[1:KYBER_SYMBYTES]
     sigma = buf[KYBER_SYMBYTES+1:2*KYBER_SYMBYTES]
@@ -281,13 +284,16 @@ function kyber_indcpa_keypair_derand(coins::Vector{UInt8})
     # Pack
     sk_bytes = kyber_pack_sk(skpv, k)
     pk_bytes = kyber_pack_pk(pkpv, rho, k)
+    wipe!(buf_in, buf, sigma, skpv, e)
 
     return pk_bytes, sk_bytes
 end
 
 function kyber_indcpa_keypair()
     coins = rand(Random.RandomDevice(), UInt8, KYBER_SYMBYTES)
-    return kyber_indcpa_keypair_derand(coins)
+    kp = kyber_indcpa_keypair_derand(coins)
+    wipe!(coins)
+    return kp
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -352,6 +358,7 @@ function kyber_indcpa_enc(m::Vector{UInt8}, pk::Vector{UInt8}, coins::Vector{UIn
 
     # Pack ciphertext
     ct = kyber_pack_ciphertext(b, v, k)
+    wipe!(msg_poly, sp, ep, epp, b, v)
     return ct
 end
 
@@ -385,6 +392,7 @@ function kyber_indcpa_dec(ct::Vector{UInt8}, sk::Vector{UInt8})
     # Convert back to message
     msg = Vector{UInt8}(undef, KYBER_INDCPA_MSGBYTES)
     kyber_poly_tomsg!(msg, mp)
+    wipe!(s_hat, mp)
     return msg
 end
 
@@ -420,19 +428,20 @@ function kyber_kem_keypair_derand(coins::Vector{UInt8})
     length(coins) == 2 * KYBER_SYMBYTES || throw(ArgumentError("keygen coins must be $(2 * KYBER_SYMBYTES) bytes (d ‖ z)"))
     # coins is 2*KYBER_SYMBYTES = 64 bytes
     # First 32 bytes -> indcpa keygen seed, last 32 bytes -> z
-    pk, sk_cpa = kyber_indcpa_keypair_derand(coins[1:KYBER_SYMBYTES])
+    pk, sk_cpa = kyber_indcpa_keypair_derand(coins)
 
     # Build KEM secret key: sk_cpa || pk || H(pk) || z
     h_pk = kyber_hash_h(pk)
-    z = coins[KYBER_SYMBYTES+1:2*KYBER_SYMBYTES]
-
-    sk = vcat(sk_cpa, pk, h_pk, z)
+    sk = vcat(sk_cpa, pk, h_pk, view(coins, KYBER_SYMBYTES+1:2*KYBER_SYMBYTES))
+    wipe!(sk_cpa)
     return pk, sk
 end
 
 function kyber_kem_keypair()
     coins = rand(Random.RandomDevice(), UInt8, 2 * KYBER_SYMBYTES)
-    return kyber_kem_keypair_derand(coins)
+    kp = kyber_kem_keypair_derand(coins)
+    wipe!(coins)
+    return kp
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -443,7 +452,7 @@ function kyber_kem_enc_derand(pk::Vector{UInt8}, coins::Vector{UInt8})
     kyber_ek_check(pk) || throw(ArgumentError("$IDENTIFIER encapsulation key failed the FIPS 203 input check"))
     length(coins) == KYBER_SYMBYTES || throw(ArgumentError("coins must be $KYBER_SYMBYTES bytes"))
     # buf = coins (the message m)
-    buf = copy(coins[1:KYBER_SYMBYTES])
+    buf = copy(coins)
 
     # Multitarget countermeasure: buf = m || H(pk)
     h_pk = kyber_hash_h(pk)
@@ -453,17 +462,21 @@ function kyber_kem_enc_derand(pk::Vector{UInt8}, coins::Vector{UInt8})
     kr = kyber_hash_g(buf_full)
 
     # Encrypt: ct = indcpa_enc(m, pk, kr[33:64])
-    ct = kyber_indcpa_enc(buf, pk, kr[KYBER_SYMBYTES+1:2*KYBER_SYMBYTES])
+    r = kr[KYBER_SYMBYTES+1:2*KYBER_SYMBYTES]
+    ct = kyber_indcpa_enc(buf, pk, r)
 
     # Shared secret = first 32 bytes of kr
     ss = kr[1:KYBER_SYMBYTES]
+    wipe!(buf, buf_full, kr, r)
 
     return ct, ss
 end
 
 function kyber_kem_enc(pk::Vector{UInt8})
     coins = rand(Random.RandomDevice(), UInt8, KYBER_SYMBYTES)
-    return kyber_kem_enc_derand(pk, coins)
+    res = kyber_kem_enc_derand(pk, coins)
+    wipe!(coins)
+    return res
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -489,7 +502,8 @@ function kyber_kem_dec(ct::Vector{UInt8}, sk::Vector{UInt8})
     kr = kyber_hash_g(buf_full)
 
     # Re-encrypt: cmp = indcpa_enc(m', pk, kr[33:64])
-    cmp = kyber_indcpa_enc(buf, pk, kr[KYBER_SYMBYTES+1:2*KYBER_SYMBYTES])
+    r = kr[KYBER_SYMBYTES+1:2*KYBER_SYMBYTES]
+    cmp = kyber_indcpa_enc(buf, pk, r)
 
     # Constant-time verify
     fail = kyber_verify(ct, cmp)
@@ -501,7 +515,9 @@ function kyber_kem_dec(ct::Vector{UInt8}, sk::Vector{UInt8})
     # cmov copies x into r when b==1; C does cmov(ss, kr, KYBER_SYMBYTES, !fail)
     # !fail: fail=0 -> b=1 (copy), fail=1 -> b=0 (keep rejection key)
     b = UInt8(1 - fail)
-    kyber_cmov!(ss, kr[1:KYBER_SYMBYTES], b)
+    k = kr[1:KYBER_SYMBYTES]
+    kyber_cmov!(ss, k, b)
+    wipe!(sk_cpa, z, buf, buf_full, kr, r, k)
 
     return ss
 end

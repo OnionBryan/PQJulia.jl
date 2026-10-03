@@ -18,7 +18,7 @@ include("falcon/falcon_mrm.jl")
 for (name, n) in [(:Falcon512, 512), (:Falcon1024, 1024)]
     @eval module $name
 
-    export falcon_keygen, falcon_sign, falcon_verify, falcon_expand_sk, falcon_certify,
+    export falcon_keygen, falcon_sign, falcon_verify, falcon_expand_sk, falcon_wipe!, falcon_certify,
            falcon_mrm_sign, falcon_mrm_verify
 
     import ..Falcon, ..FalconMRM
@@ -41,7 +41,9 @@ for (name, n) in [(:Falcon512, 512), (:Falcon1024, 1024)]
     function falcon_certify(sk::AbstractVector{UInt8}; fips206::Bool=false)
         length(sk) == SK_BYTES || throw(ArgumentError("$IDENTIFIER secret key must be $SK_BYTES bytes"))
         k = Falcon.decode_sk(sk); k === nothing && throw(ArgumentError("invalid $IDENTIFIER secret key"))
-        Falcon.certify(k; fips206)
+        c = Falcon.certify(k; fips206)
+        Falcon.wipe_sk!(k)
+        c
     end
 
     "Decode `sk` once and precompute its ffLDL tree, for repeated signing."
@@ -50,8 +52,16 @@ for (name, n) in [(:Falcon512, 512), (:Falcon1024, 1024)]
         Falcon.expand_sk(sk)
     end
 
+    "Zero an expanded key's secret arrays (decoded key, FFT basis, ffLDL tree); it is unusable afterwards."
+    falcon_wipe!(ek::Falcon.ExpandedKey) = Falcon.wipe!(ek)
+
     "Sign `msg`; returns a padded $(Falcon.sig_bytes($n))-byte signature."
-    falcon_sign(msg::AbstractVector{UInt8}, sk::AbstractVector{UInt8}) = Falcon.sign(msg, falcon_expand_sk(sk))
+    function falcon_sign(msg::AbstractVector{UInt8}, sk::AbstractVector{UInt8})
+        ek = falcon_expand_sk(sk)
+        sig = Falcon.sign(msg, ek)
+        Falcon.wipe!(ek)
+        sig
+    end
     falcon_sign(msg::AbstractVector{UInt8}, ek::Falcon.ExpandedKey) =
         ek.sk.n == N ? Falcon.sign(msg, ek) : throw(ArgumentError("key is not a $IDENTIFIER key"))
 
@@ -65,8 +75,12 @@ for (name, n) in [(:Falcon512, 512), (:Falcon1024, 1024)]
     const MRM_MAX_BITS = FalconMRM.max_bits(MRM_M1_LEN)
 
     "Sign (M1, M2) with message recovery; returns an $(FalconMRM.sig_bytes($n))-byte signature."
-    falcon_mrm_sign(M1::AbstractVector{<:Integer}, M2::AbstractVector{UInt8}, sk::AbstractVector{UInt8}) =
-        FalconMRM.sign(M1, M2, falcon_expand_sk(sk))
+    function falcon_mrm_sign(M1::AbstractVector{<:Integer}, M2::AbstractVector{UInt8}, sk::AbstractVector{UInt8})
+        ek = falcon_expand_sk(sk)
+        sig = FalconMRM.sign(M1, M2, ek)
+        Falcon.wipe!(ek)
+        sig
+    end
     falcon_mrm_sign(M1::AbstractVector{<:Integer}, M2::AbstractVector{UInt8}, ek::Falcon.ExpandedKey) =
         ek.sk.n == N ? FalconMRM.sign(M1, M2, ek) : throw(ArgumentError("key is not a $IDENTIFIER key"))
 

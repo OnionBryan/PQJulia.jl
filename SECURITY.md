@@ -45,6 +45,27 @@ constant-time code is not guaranteed to stay constant-time after compilation.
 | Falcon signing (ffSampling, SamplerZ) | Floating-point FFT and Gaussian sampling on secret data |
 | Falcon keygen (NTRU solver) | BigInt arithmetic; `fixedpoint=true` removes floating point (ePrint 2023/290) |
 
+## Secrets in memory
+
+Every secret buffer the package allocates is zeroed before the call returns: `wipe!` writes
+zeros and then passes the buffer to an empty inline-assembly statement, so the compiler cannot
+drop the zeroing as a dead store (`test/wipe.jl` checks the compiled code). Secret keys are built
+into storage reserved at full size, so no partial copy is left behind by a reallocation.
+
+| Scheme | Wiped |
+|--------|-------|
+| ML-KEM | keygen seed expansion, σ, s and e, PRF and noise buffers; encapsulation m, (K, r) and the noise vectors; decapsulation s, m′, (K′, r′), z and the rejection-key input |
+| ML-DSA | keygen seed expansion, ρ′, K, s1, s2, t and t0; the decoded s1, s2 and t0 when signing, K, ρ′, y, z, w0, the hints and the packing buffers of every attempt |
+| X-Wing | the expanded ML-KEM key and X25519 scalar, the encapsulation seed and both partial shared secrets |
+| X25519 | holds its scalar and field elements in immutable tuples, which leave no heap copy |
+| Falcon | the decoded f, g, F, G, the FFT basis and the ffLDL tree whenever the API decodes a byte key for one call; keygen's key once encoded |
+
+What the caller owns stays the caller's to erase: secret keys, returned shared secrets, and an
+expanded Falcon key (`falcon_wipe!(ek)`). `wipe!` is exported for this. Not wiped: the Keccak state
+inside SHA.jl, BigInt (GMP) values in Falcon keygen and key checks and in Shamir, and the
+intermediate arrays of Falcon's floating-point signer. Julia's garbage collector does not move
+objects, but it does not lock pages either, so memory can reach swap or a core dump.
+
 ## Known Issues Addressed
 
 | Issue | Source | Status |

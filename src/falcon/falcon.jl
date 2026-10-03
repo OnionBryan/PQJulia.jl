@@ -17,6 +17,7 @@ import ..FalconNTRUGen as NG
 import ..FalconEncoding as FE
 import ..FalconCertify as FC
 import ..FalconFxp as FX
+import ...Wipe: wipe!
 
 const q = 12289
 const SALT_LEN = 40
@@ -230,7 +231,7 @@ end
 
 # ── ffSampling (Falcon spec §3.9; tprest ffsampling.py, fft_ratio = 1) ─────
 # ffLDL tree of the FFT Gram matrix of B₀ = [[g, −f], [G, −F]]; leaves hold σ/√d.
-struct FFLeaf
+mutable struct FFLeaf                              # mutable so wipe! can clear it
     σ::Float64
 end
 struct FFNode
@@ -244,10 +245,16 @@ function ffldl(g00, g01, g11, σ)
     d11 = g11 .- l10 .* conj.(l10) .* g00
     if length(g00) > 2
         a0, a1 = FF.split_fft(g00); b0, b1 = FF.split_fft(d11)
-        return FFNode(l10, ffldl(a0, a1, a0, σ), ffldl(b0, b1, b0, σ))
+        node = FFNode(l10, ffldl(a0, a1, a0, σ), ffldl(b0, b1, b0, σ))
+        wipe!(d11, a0, a1, b0, b1)
+        return node
     end
-    FFNode(l10, FFLeaf(σ / sqrt(real(g00[1]))), FFLeaf(σ / sqrt(real(d11[1]))))
+    node = FFNode(l10, FFLeaf(σ / sqrt(real(g00[1]))), FFLeaf(σ / sqrt(real(d11[1]))))
+    wipe!(d11)
+    node
 end
+wipe!(T::FFLeaf) = (T.σ = 0.0; T)
+wipe!(T::FFNode) = (wipe!(T.l10); wipe!(T.t0); wipe!(T.t1); T)
 
 function ffsample(t0, t1, T, σmin, r)
     if T isa FFLeaf
@@ -269,6 +276,7 @@ function sign_setup(sk)
     g11 = b10 .* conj.(b10) .+ b11 .* conj.(b11)
     p = params(sk.n)
     T = ffldl(g00, g01, g11, p.σ)
+    wipe!(g00, g01, g11)
     # Every leaf must lie in [σmin, σmax] or the signature distribution is wrong: refuse to sign
     # (NIST FIPS 206 status update, Perlner, Oct 2025; the round-3 spec relies on the GS-norm check alone).
     all(σ -> p.σmin <= σ <= FS.MAX_SIGMA, leaves(T)) ||
@@ -332,7 +340,8 @@ end
 # ── Byte encodings (spec §3.11; C reference codec.c) ────────────────────────
 # Fixed-width fields, MSB-first; the final partial byte is zero-padded on the right.
 function pack_bits(vals, bits)
-    out = UInt8[]; acc = UInt64(0); nacc = 0; mask = (UInt64(1) << bits) - 1
+    out = sizehint!(UInt8[], cld(length(vals) * bits, 8))   # no regrowth copies
+    acc = UInt64(0); nacc = 0; mask = (UInt64(1) << bits) - 1
     for v in vals
         acc = (acc << bits) | ((Int64(v) % UInt64) & mask); nacc += bits
         while nacc >= 8
@@ -367,7 +376,10 @@ end
 
 function encode_sk(sk)
     n = sk.n; b = FG_BITS[logn(n)]
-    vcat(UInt8(0x50 + logn(n)), pack_bits(sk.f, b), pack_bits(sk.g, b), pack_bits(sk.F, FFGG_BITS))
+    pf, pg, pF = pack_bits(sk.f, b), pack_bits(sk.g, b), pack_bits(sk.F, FFGG_BITS)
+    out = vcat(UInt8(0x50 + logn(n)), pf, pg, pF)
+    wipe!(pf, pg, pF)
+    out
 end
 
 signext(v, bits) = v >= 1 << (bits - 1) ? v - (1 << bits) : v
@@ -376,7 +388,8 @@ signext(v, bits) = v >= 1 << (bits - 1) ? v - (1 << bits) : v
 function decode_signed(bytes, n, bits)
     u = unpack_bits(bytes, n, bits); u === nothing && return nothing
     s = signext.(u, bits)
-    any(==(-(1 << (bits - 1))), s) ? nothing : s
+    wipe!(u)
+    any(==(-(1 << (bits - 1))), s) ? (wipe!(s); nothing) : s
 end
 
 # G is not stored: G = (q + g·F)/f mod q, exact once centered since |G| < 128.
@@ -390,13 +403,20 @@ function decode_sk(skb::AbstractVector{UInt8})
     f = decode_signed(@view(skb[2:1+lf]), n, b)
     g = decode_signed(@view(skb[2+lf:1+2lf]), n, b)
     F = decode_signed(@view(skb[2+2lf:end]), n, FFGG_BITS)
-    (f === nothing || g === nothing || F === nothing) && return nothing
-    is_invertible(f) || return nothing
-    gF = poly_mul_modq(g, F); gF[1] = mod(gF[1] + q, q)
-    G = centermod.(poly_div_modq(gF, f))
-    fits(G, FFGG_BITS) || return nothing
-    NG.ntru_check(BigInt.(f), BigInt.(g), BigInt.(F), BigInt.(G)) || return nothing
-    secret_key(f, g, F, G)
+    if f === nothing || g === nothing || F === nothing
+        for x in (f, g, F); x === nothing || wipe!(x); end
+        return nothing
+    end
+    sk = nothing; gF = Int[]; G = Int[]
+    if is_invertible(f)
+        gF = poly_mul_modq(g, F); gF[1] = mod(gF[1] + q, q)
+        G = centermod.(poly_div_modq(gF, f))
+        if fits(G, FFGG_BITS) && NG.ntru_check(BigInt.(f), BigInt.(g), BigInt.(F), BigInt.(G))
+            sk = secret_key(f, g, F, G)
+        end
+    end
+    wipe!(f, g, F, G, gF)
+    sk
 end
 
 # Padded signature: header 0x30+logn ‖ salt(40) ‖ compress(s1), fixed length.
@@ -419,13 +439,28 @@ function expand_sk(skb::AbstractVector{UInt8})
     sk = decode_sk(skb); sk === nothing && throw(ArgumentError("invalid Falcon secret key"))
     expand_sk(sk)
 end
+wipe_sk!(sk) = (wipe!(sk.f, sk.g, sk.F, sk.G); sk)
+function wipe!(ek::ExpandedKey)
+    wipe_sk!(ek.sk)
+    g = ek.gs
+    wipe!(g.b00, g.b01, g.b10, g.b11); wipe!(g.T)
+    ek
+end
 
 function keypair(n::Int; randombytes=sysrandom, certified=false, fips206=false, fixedpoint=false)
     sk = keygen(n; randombytes, certified, fips206, fixedpoint)
-    encode_pk(sk.h, n), encode_sk(sk)
+    pk, skb = encode_pk(sk.h, n), encode_sk(sk)
+    wipe_sk!(sk)
+    pk, skb
 end
 
-sign(msg::AbstractVector{UInt8}, sk; randombytes=sysrandom) = sign(msg, expand_sk(sk); randombytes)
+sign(msg::AbstractVector{UInt8}, sk::NamedTuple; randombytes=sysrandom) = sign(msg, expand_sk(sk); randombytes)
+function sign(msg::AbstractVector{UInt8}, skb::AbstractVector{UInt8}; randombytes=sysrandom)
+    ek = expand_sk(skb)
+    sig = sign(msg, ek; randombytes)
+    wipe!(ek)
+    sig
+end
 function sign(msg::AbstractVector{UInt8}, ek::ExpandedKey; randombytes=sysrandom)
     encode_sig(sign_poly(ek.sk, ek.gs, msg; randombytes), ek.sk.n)
 end
