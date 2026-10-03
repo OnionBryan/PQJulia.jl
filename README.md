@@ -59,8 +59,13 @@ accepted by the other, and so are secret keys used for signing.
 [dudect](https://eprint.iacr.org/2016/1069) on the functions [SECURITY.md](SECURITY.md) lists as
 constant-time: ML-KEM decapsulation of valid and tampered ciphertexts, `kyber_verify`,
 `kyber_cmov!`, the X25519 ladder and its output encoding. |t| > 4.5 on any percentile crop flags
-a timing difference. Run it on an idle machine: `julia --project=. test/timing/dudect.jl` (`DUDECT_N` sets the sample
-count, default 100,000).
+a timing difference. Run it on an idle machine with `julia --project=. test/timing/dudect.jl`
+(`DUDECT_N` sets the sample count, default 100,000).
+
+`julia test/timing/dispatch.jl` (opt-in; installs [JET](https://github.com/aviatesk/JET.jl) into a
+temporary environment) checks ML-KEM, X25519 and X-Wing for runtime dispatch. A boxed or
+type-unstable value on secret data makes timing depend on the value, which is how the X25519
+encoding leaked; JET finds it without timing noise.
 
 ## Installation
 
