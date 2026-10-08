@@ -11,6 +11,10 @@ isdir(KAT_DIR) || error("KAT directory not found at $KAT_DIR — the ACVP vector
 h(x) = hex2bytes(x)
 groups(file, pred) = [g for g in JSON.parsefile(joinpath(KAT_DIR, file))["testGroups"] if pred(g)]
 
+# ==================== Keccak (FIPS 202) ====================
+
+include("keccak.jl")
+
 # ==================== ML-KEM (FIPS 203) ====================
 
 @testset "ML-KEM Roundtrip (all levels)" begin

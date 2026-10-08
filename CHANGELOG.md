@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Performance
+
+Medians on one x86-64 core, each scheme in a fresh process; outputs are unchanged bit for bit.
+
+- Keccak-f[1600] in the package (`src/keccak.jl`): the 25-lane state is an immutable tuple and
+  the round is straight-line code with constant rotations. SHAKE128 (672 bytes) takes 2.1 µs
+  against 5.9 µs in SHA.jl, and the state leaves no heap copy. SHA.jl remains for the SHA-2
+  pre-hashes of HashML-DSA.
+- ML-KEM: `montgomery_reduce` drops the trailing `rem` by q, a no-op for every operand the
+  scheme produces (|a| ≤ q·2¹⁵, checked on all ACVP, Wycheproof and CCTV vectors); basemul
+  works on scalars instead of SubArrays; compression no longer allocates per 8 coefficients;
+  NTT, sampling and packing loops check bounds once. 3.0–3.5× at every level.
+- ML-DSA: pointwise multiply-accumulate in one pass, bounds checked once in the NTT, sampling
+  and packing loops. 2.0–3.2×.
+- Falcon verification: per-degree NTT tables replace the per-call root search and `powermod`
+  per coefficient; butterflies run in UInt32 with branch-free reduction; signature
+  (de)compression reads and writes bits in place. 5.6× (Falcon-512) and 5.7× (Falcon-1024).
+- Falcon signing: ChaCha20 runs on registers and refills its buffer in place, SamplerZ reads its
+  bytes from that buffer, and the FFT roots come from a table built at load. 35% fewer
+  allocations; 3–11% faster.
+
 ## 0.3.1
 
 - Falcon secret-key decoding is constant-time: Fermat inversion with a fixed exponent replaces the

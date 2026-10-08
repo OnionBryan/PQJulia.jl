@@ -42,7 +42,7 @@ constant-time code is not guaranteed to stay constant-time after compilation.
 | Julia GC pauses, JIT compilation | First call compiles; warm up before timing-sensitive use |
 | `poly_uniform_eta!` (ML-DSA keygen) | Rejection sampling, as in the reference: timing shows which bytes were rejected, and those are independent of the kept coefficients |
 | Matrix expansion (ML-KEM, ML-DSA) | Rejection sampling on the public seed ρ |
-| SHAKE (SHA.jl) | Timing depends on input length, which is public |
+| SHAKE, SHA3 (keccak.jl) | Timing depends on input length, which is public |
 | SamplerZ rejection and BerExp, signature retries (Falcon) | As in the reference: iteration counts and the bytes compared depend on fresh randomness |
 | Falcon keygen (NTRU solver) | BigInt arithmetic; `fixedpoint=true` removes floating point (ePrint 2023/290) |
 
@@ -59,11 +59,12 @@ into storage reserved at full size, so no partial copy is left behind by a reall
 | ML-DSA | keygen seed expansion, ρ′, K, s1, s2, t and t0; the decoded s1, s2 and t0 when signing, K, ρ′, y, z, w0, the hints and the packing buffers of every attempt |
 | X-Wing | the expanded ML-KEM key and X25519 scalar, the encapsulation seed and both partial shared secrets |
 | X25519 | holds its scalar and field elements in immutable tuples, which leave no heap copy |
-| Falcon | the decoded f, g, F, G, the FFT basis and the ffLDL tree whenever the API decodes a byte key for one call; keygen's key once encoded; the signer's FFT and ffSampling arrays, ChaCha20 state and keystream, and SamplerZ's random bytes |
+| SHAKE, SHA3 | the Keccak state is an immutable tuple (keccak.jl), which leaves no heap copy |
+| Falcon | the decoded f, g, F, G, the FFT basis and the ffLDL tree whenever the API decodes a byte key for one call; keygen's key once encoded; the signer's FFT and ffSampling arrays, and the ChaCha20 state and keystream, which SamplerZ reads in place |
 
 What the caller owns stays the caller's to erase: secret keys, returned shared secrets, and an
-expanded Falcon key (`falcon_wipe!(ek)`). `wipe!` is exported for this. Not wiped: the Keccak state
-inside SHA.jl, and BigInt (GMP) values in Falcon keygen and in Shamir. Julia's
+expanded Falcon key (`falcon_wipe!(ek)`). `wipe!` is exported for this. Not wiped: BigInt (GMP)
+values in Falcon keygen and in Shamir. Julia's
 garbage collector does not move
 objects, but it does not lock pages either, so memory can reach swap or a core dump.
 

@@ -7,6 +7,7 @@ module MLDSA
 using SHA
 using Random
 using ..Wipe: wipe!
+import ..Keccak
 
 # Shared primitives — same for all security levels
 include("dilithium_core.jl")
@@ -45,12 +46,13 @@ for (category, params) in CATEGORY_PARAMS
     import ..MLDSA: Q, N, D, ZETAS
     import ..MLDSA: montgomery_reduce, reduce32, caddq, freeze
     import ..MLDSA: ntt!, invntt!
-    import ..MLDSA: poly_pointwise!, poly_add!, poly_sub!
+    import ..MLDSA: poly_pointwise!, poly_pointwise_acc!, poly_add!, poly_sub!
     import ..MLDSA: poly_reduce!, poly_caddq!, poly_shiftl!, poly_chknorm
     import ..MLDSA: poly_uniform!, power2round
     import ..MLDSA: derived_sizes, wipe!
 
     import SHA
+    import ...Keccak
     using Random
 
     # Per-level constants

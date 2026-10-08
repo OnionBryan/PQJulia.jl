@@ -10,6 +10,7 @@ module FalconFpr
 
 import ..FalconFFT as FF
 import ..FalconSampler as FS
+import ..FalconChaCha as CC
 import ...Wipe: wipe!
 
 # ── binary64 as raw bits ────────────────────────────────────────────────────
@@ -216,9 +217,10 @@ chalf(a::CF) = CF(half(a.re), half(a.im))
 cdiv_real(a::CF, b::CF) = (t = div(ONE, b.re); CF(mul(a.re, t), mul(a.im, t)))
 
 # ── FFT over ℝ[x]/(xⁿ+1), as FalconFFT ──────────────────────────────────────
-const ROOTS = Dict{Int,Vector{CF}}()
-const ROOTS_LOCK = ReentrantLock()
-roots(n) = lock(() -> get!(() -> cf.(FF.roots(n)), ROOTS, n), ROOTS_LOCK)
+# ζ for n = 2, 4, …, 1024, converted once from FalconFFT.roots (public constants). A table
+# rather than a locked Dict: split_fft and merge_fft run at every node of the ffSampling tree.
+const ROOT_TABLE = [cf.(FF.roots(1 << k)) for k in 1:10]
+roots(n) = ROOT_TABLE[trailing_zeros(n)]
 
 function split_fft(F::Vector{CF})
     n = length(F); h = n ÷ 2; ζ = roots(n)
@@ -306,12 +308,19 @@ function berexp(x::Fpr, ccs::Fpr, r)
     w < 0
 end
 
-# FalconSampler.basesampler and single bytes, with the randomness wiped after use.
+# FalconSampler.basesampler and single bytes. ChaCha20 is read in place (its buffer is wiped
+# with the generator); other sources go through copies that are wiped after use.
+byte(r::CC.ChaCha20) = CC.randbyte(r)
 byte(r) = (b = FS.randbytes(r, 1); v = b[1]; wipe!(b); v)
-function basesampler(r)
+u72(r::CC.ChaCha20) = CC.randu72(r)
+function u72(r)
     bytes = FS.randbytes(r, 9)
     u = UInt128(0); for i in 1:9; u |= UInt128(bytes[i]) << (8 * (i - 1)); end
     wipe!(bytes)
+    u
+end
+function basesampler(r)
+    u = u72(r)
     z0 = 0
     @inbounds for c in FS.RCDT; z0 += Int(u < c); end
     z0

@@ -9,7 +9,7 @@
 # ============================================================================
 module Falcon
 
-using LinearAlgebra, SHA, Random
+using LinearAlgebra, Random
 import ..FalconFFT as FF
 import ..FalconSampler as FS
 import ..FalconChaCha as CC
@@ -19,6 +19,7 @@ import ..FalconCertify as FC
 import ..FalconFxp as FX
 import ..FalconFpr as FP
 import ...Wipe: wipe!
+import ...Keccak
 
 const q = 12289
 const SALT_LEN = 40
@@ -52,15 +53,48 @@ sysrandom(k) = rand(RandomDevice(), UInt8, k)
 centermod(x) = (y = mod(x, q); y > q ÷ 2 ? y - q : y)
 
 # NTT helpers (invertibility, h = g/f, s0 = c − s1·h), negacyclic (ψ-weighted).
+# Per-degree tables (public constants), built once for n = 1, 2, …, 1024: ψ^i, n⁻¹ψ⁻ⁱ, ω^j and
+# ω⁻ʲ mod q with ω = ψ². The transforms are the exact integer maps of FalconFFT.ntt_ct! with
+# its twiddles read from the table instead of recomputed by powermod.
+struct NTTTables
+    ψpow::Vector{Int}; ψinv::Vector{Int}; ωpow::Vector{Int}; ωinv::Vector{Int}
+end
+function NTTTables(n::Int)
+    ψ = FF.psi_2n(n); ψi = invmod(ψ, q); ω = powermod(ψ, 2, q); ωi = invmod(ω, q); ni = invmod(n, q)
+    NTTTables([powermod(ψ, i, q) for i in 0:n-1], [mod(ni * powermod(ψi, i, q), q) for i in 0:n-1],
+              [powermod(ω, j, q) for j in 0:n-1], [powermod(ωi, j, q) for j in 0:n-1])
+end
+const NTT_TABLES = [NTTTables(1 << k) for k in 0:10]
+ntt_tables(n) = (ispow2(n) && n <= 1024) ? NTT_TABLES[trailing_zeros(n) + 1] :
+                throw(ArgumentError("NTT degree must be 2^k, 0 ≤ k ≤ 10"))
+
+# In-place Cooley–Tukey NTT, as FalconFFT.ntt_ct!(a, ω) with W[j+1] = ω^j mod q, on entries
+# in [0, q): products stay below q² < 2³², so each butterfly is one unsigned 32-bit remainder by
+# the constant q and two branch-free conditional subtractions.
+@inline modq_sub(x::UInt32) = x - ifelse(x >= UInt32(q), UInt32(q), UInt32(0))
+function ntt_table!(a::Vector{Int}, W::Vector{Int})
+    n = length(a); FF._bitrev!(a); len = 2
+    @inbounds while len <= n
+        h = len >> 1; step = n ÷ len
+        for i in 0:len:n-1, k in 0:h-1
+            w = W[k * step + 1] % UInt32
+            u = a[i+k+1] % UInt32; v = (a[i+k+h+1] % UInt32) * w % UInt32(q)
+            a[i+k+1] = Int(modq_sub(u + v)); a[i+k+h+1] = Int(modq_sub(u - v + UInt32(q)))
+        end
+        len <<= 1
+    end
+    a
+end
+
 function ntt_fwd(a)
-    n = length(a); ψ = FF.psi_2n(n); ω = powermod(ψ, 2, q)
-    â = [Int(mod(a[i+1] * powermod(ψ, i, q), q)) for i in 0:n-1]
-    FF.ntt_ct!(â, ω); â
+    n = length(a); T = ntt_tables(n)
+    â = [Int(mod(a[i] * T.ψpow[i], q)) for i in 1:n]
+    ntt_table!(â, T.ωpow)
 end
 function ntt_inv(A)
-    n = length(A); ψ = FF.psi_2n(n); ψi = invmod(ψ, q); ωi = invmod(powermod(ψ, 2, q), q); ni = invmod(n, q)
-    C = Int.(collect(A)); FF.ntt_ct!(C, ωi)
-    [Int(mod(C[i+1] * ni % q * powermod(ψi, i, q), q)) for i in 0:n-1]
+    n = length(A); T = ntt_tables(n)
+    C = ntt_table!([Int(mod(x, q)) for x in A], T.ωinv)
+    [Int(mod(C[i] * T.ψinv[i], q)) for i in 1:n]
 end
 is_invertible(f) = all(!=(0), ntt_fwd(mod.(f, q)))
 # x^(q−2) mod q: fixed public exponent, constant modulus, no Euclid on secret data.
@@ -210,7 +244,7 @@ function hash_to_point(msg::AbstractVector{UInt8}, salt::AbstractVector{UInt8}, 
     k = (1 << 16) ÷ q
     len = 4n + 64
     while true
-        stream = SHA.shake256(vcat(salt, msg), UInt64(len))
+        stream = Keccak.shake256(vcat(salt, msg), UInt64(len))
         c = Int[]; i = 1
         while length(c) < n && i + 1 <= length(stream)
             elt = (Int(stream[i]) << 8) + Int(stream[i+1]); i += 2

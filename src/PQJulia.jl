@@ -41,6 +41,9 @@ include("wipe.jl")
 using .Wipe
 export wipe!
 
+# Keccak-f[1600]: SHAKE128/256 and SHA3-256/512 for every scheme
+include("keccak.jl")
+
 # ML-KEM (FIPS 203) — Kyber Key Encapsulation
 include("mlkem.jl")
 using .MLKEM

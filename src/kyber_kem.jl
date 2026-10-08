@@ -3,7 +3,7 @@
 
 function kyber_rkprf(key::Vector{UInt8}, input::Vector{UInt8})
     inp = vcat(key, input)
-    out = SHA.shake256(inp, UInt64(KYBER_SSBYTES))
+    out = Keccak.shake256(inp, UInt64(KYBER_SSBYTES))
     wipe!(inp)
     return out
 end
@@ -89,18 +89,15 @@ end
 function kyber_polyvec_compress!(r::AbstractVector{UInt8},
                                  a::Vector{Vector{Int16}},
                                  k::Int)
-    idx = 1
+    idx = firstindex(r)
+    checkbounds(r, idx:idx + KYBER_POLYVECCOMPRESSEDBYTES - 1)
     if KYBER_DU == 10
         # d=10: 4 coefficients → 5 bytes (ML-KEM-512, ML-KEM-768)
         for i in 1:k
-            for j in 0:(KYBER_N ÷ 4 - 1)
-                t = Vector{UInt16}(undef, 4)
-                for m in 0:3
-                    u = caddq(a[i][4j + m + 1])
-                    d0 = UInt64(u % UInt16)
-                    d0 <<= 10; d0 += 1665; d0 *= 1290167; d0 >>= 32
-                    t[m + 1] = UInt16(d0 & 0x3ff)
-                end
+            ai = a[i]; checkbounds(ai, 1:KYBER_N)
+            @inbounds for j in 0:(KYBER_N ÷ 4 - 1)
+                # ((u << 10) + 1665) * 1290167 >> 32
+                t = ntuple(m -> UInt16((((UInt64(caddq(ai[4j + m]) % UInt16) << 10 + 1665) * 1290167) >> 32) & 0x3ff), Val(4))
                 r[idx]     = (t[1]) % UInt8
                 r[idx + 1] = ((t[1] >> 8) | (t[2] << 2)) % UInt8
                 r[idx + 2] = ((t[2] >> 6) | (t[3] << 4)) % UInt8
@@ -112,14 +109,10 @@ function kyber_polyvec_compress!(r::AbstractVector{UInt8},
     elseif KYBER_DU == 11
         # d=11: 8 coefficients → 11 bytes (ML-KEM-1024)
         for i in 1:k
-            for j in 0:(KYBER_N ÷ 8 - 1)
-                t = Vector{UInt16}(undef, 8)
-                for m in 0:7
-                    u = caddq(a[i][8j + m + 1])
-                    d0 = UInt64(u % UInt16)
-                    d0 <<= 11; d0 += 1664; d0 *= 645084; d0 >>= 31
-                    t[m + 1] = UInt16(d0 & 0x7ff)
-                end
+            ai = a[i]; checkbounds(ai, 1:KYBER_N)
+            @inbounds for j in 0:(KYBER_N ÷ 8 - 1)
+                # ((u << 11) + 1664) * 645084 >> 31
+                t = ntuple(m -> UInt16((((UInt64(caddq(ai[8j + m]) % UInt16) << 11 + 1664) * 645084) >> 31) & 0x7ff), Val(8))
                 r[idx]      = (t[1]) % UInt8
                 r[idx + 1]  = ((t[1] >> 8) | (t[2] << 3)) % UInt8
                 r[idx + 2]  = ((t[2] >> 5) | (t[3] << 6)) % UInt8
@@ -141,37 +134,39 @@ end
 function kyber_polyvec_decompress!(r::Vector{Vector{Int16}},
                                    a::AbstractVector{UInt8},
                                    k::Int)
-    idx = 1
+    idx = firstindex(a)
+    checkbounds(a, idx:idx + KYBER_POLYVECCOMPRESSEDBYTES - 1)
     if KYBER_DU == 10
         # d=10: 5 bytes → 4 coefficients
         for i in 1:k
-            for j in 0:(KYBER_N ÷ 4 - 1)
+            ri = r[i]; checkbounds(ri, 1:KYBER_N)
+            @inbounds for j in 0:(KYBER_N ÷ 4 - 1)
                 t1 = UInt16(a[idx]) | (UInt16(a[idx+1]) << 8); t1 &= 0x3ff
                 t2 = (UInt16(a[idx+1]) >> 2) | (UInt16(a[idx+2]) << 6); t2 &= 0x3ff
                 t3 = (UInt16(a[idx+2]) >> 4) | (UInt16(a[idx+3]) << 4); t3 &= 0x3ff
                 t4 = (UInt16(a[idx+3]) >> 6) | (UInt16(a[idx+4]) << 2); t4 &= 0x3ff
-                r[i][4j+1] = kyber_decompress(t1, 10)
-                r[i][4j+2] = kyber_decompress(t2, 10)
-                r[i][4j+3] = kyber_decompress(t3, 10)
-                r[i][4j+4] = kyber_decompress(t4, 10)
+                ri[4j+1] = kyber_decompress(t1, 10)
+                ri[4j+2] = kyber_decompress(t2, 10)
+                ri[4j+3] = kyber_decompress(t3, 10)
+                ri[4j+4] = kyber_decompress(t4, 10)
                 idx += 5
             end
         end
     elseif KYBER_DU == 11
         # d=11: 11 bytes → 8 coefficients
         for i in 1:k
-            for j in 0:(KYBER_N ÷ 8 - 1)
-                t = Vector{UInt16}(undef, 8)
-                t[1] = (UInt16(a[idx]) | (UInt16(a[idx+1]) << 8)) & 0x7ff
-                t[2] = ((UInt16(a[idx+1]) >> 3) | (UInt16(a[idx+2]) << 5)) & 0x7ff
-                t[3] = ((UInt16(a[idx+2]) >> 6) | (UInt16(a[idx+3]) << 2) | (UInt16(a[idx+4]) << 10)) & 0x7ff
-                t[4] = ((UInt16(a[idx+4]) >> 1) | (UInt16(a[idx+5]) << 7)) & 0x7ff
-                t[5] = ((UInt16(a[idx+5]) >> 4) | (UInt16(a[idx+6]) << 4)) & 0x7ff
-                t[6] = ((UInt16(a[idx+6]) >> 7) | (UInt16(a[idx+7]) << 1) | (UInt16(a[idx+8]) << 9)) & 0x7ff
-                t[7] = ((UInt16(a[idx+8]) >> 2) | (UInt16(a[idx+9]) << 6)) & 0x7ff
-                t[8] = ((UInt16(a[idx+9]) >> 5) | (UInt16(a[idx+10]) << 3)) & 0x7ff
+            ri = r[i]; checkbounds(ri, 1:KYBER_N)
+            @inbounds for j in 0:(KYBER_N ÷ 8 - 1)
+                t = ((UInt16(a[idx]) | (UInt16(a[idx+1]) << 8)) & 0x7ff,
+                     ((UInt16(a[idx+1]) >> 3) | (UInt16(a[idx+2]) << 5)) & 0x7ff,
+                     ((UInt16(a[idx+2]) >> 6) | (UInt16(a[idx+3]) << 2) | (UInt16(a[idx+4]) << 10)) & 0x7ff,
+                     ((UInt16(a[idx+4]) >> 1) | (UInt16(a[idx+5]) << 7)) & 0x7ff,
+                     ((UInt16(a[idx+5]) >> 4) | (UInt16(a[idx+6]) << 4)) & 0x7ff,
+                     ((UInt16(a[idx+6]) >> 7) | (UInt16(a[idx+7]) << 1) | (UInt16(a[idx+8]) << 9)) & 0x7ff,
+                     ((UInt16(a[idx+8]) >> 2) | (UInt16(a[idx+9]) << 6)) & 0x7ff,
+                     ((UInt16(a[idx+9]) >> 5) | (UInt16(a[idx+10]) << 3)) & 0x7ff)
                 for m in 1:8
-                    r[i][8j+m] = kyber_decompress(t[m], 11)
+                    ri[8j+m] = kyber_decompress(t[m], 11)
                 end
                 idx += 11
             end
