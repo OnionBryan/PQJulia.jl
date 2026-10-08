@@ -332,24 +332,21 @@ function dilithium_keygen_derand(xi::Vector{UInt8})
     s1hat = [copy(s) for s in s1]
     for i in 1:L; ntt!(s1hat[i]); end
 
-    t = [zeros(Int32, N) for _ in 1:K]
-    for i in 1:K
-        fill!(t[i], Int32(0))
-        for j in 1:L
-            poly_pointwise_acc!(t[i], A[i,j], s1hat[j])
-        end
-        poly_reduce!(t[i])
-        invntt!(t[i])
-        poly_add!(t[i], t[i], s2[i])
-        poly_caddq!(t[i])
-    end
-
-    # power2round: t = t1*2^D + t0
+    # One row of t at a time, split by power2round: t = t1*2^D + t0
+    t = zeros(Int32, N)
     t1 = [zeros(Int32, N) for _ in 1:K]
     t0 = [zeros(Int32, N) for _ in 1:K]
     for i in 1:K
+        fill!(t, Int32(0))
+        for j in 1:L
+            poly_pointwise_acc!(t, A[i,j], s1hat[j])
+        end
+        poly_reduce!(t)
+        invntt!(t)
+        poly_add!(t, t, s2[i])
+        poly_caddq!(t)
         for j in 1:N
-            t1[i][j], t0[i][j] = power2round(t[i][j])
+            t1[i][j], t0[i][j] = power2round(t[j])
         end
     end
 
@@ -657,18 +654,19 @@ function dilithium_verify_mu(mu::Vector{UInt8}, sig::Vector{UInt8}, pk::Vector{U
         poly_chknorm(z[i], GAMMA1 - BETA) && return false
     end
 
-    # Expand A, compute w1' = Az - c*t1*2^D
+    # w1' = Az - c*t1*2^D
     cp = zeros(Int32, N)
     poly_challenge!(cp, c_tilde)
-    A = expand_A(rho)
 
     for i in 1:L; ntt!(z[i]); end
     w1p = [zeros(Int32, N) for _ in 1:K]
     tmp = zeros(Int32, N)
+    # Each A[i,j] is used once, so expand it into tmp one entry at a time
     for i in 1:K
         fill!(w1p[i], Int32(0))
         for j in 1:L
-            poly_pointwise_acc!(w1p[i], A[i,j], z[j])
+            poly_uniform!(tmp, rho, UInt16((i-1) << 8 | (j-1)))
+            poly_pointwise_acc!(w1p[i], tmp, z[j])
         end
     end
 

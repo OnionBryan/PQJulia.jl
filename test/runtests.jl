@@ -183,6 +183,13 @@ end
 # ==================== Shamir ====================
 
 @testset "Shamir Secret Sharing" begin
+    @testset "mod_inverse" begin
+        @test PQJulia.mod_inverse(3, 11) == 4
+        @test PQJulia.mod_inverse(10, 17) == 12
+        @test PQJulia.mod_inverse(-3, 11) == 7
+        @test_throws ArgumentError PQJulia.mod_inverse(2, 4)
+        @test_throws ArgumentError PQJulia.mod_inverse(3, 9)
+    end
     @testset "Basic roundtrip" begin
         for secret in [0, 1, 42, 1000, big(2)^126]
             shares = shamir_share(secret, 3, 5)
@@ -199,6 +206,10 @@ end
         secret_bytes = rand(UInt8, 32)
         shares = shamir_share_bytes(secret_bytes, 3, 5)
         @test shamir_reconstruct_bytes(shares, 3, 32) == secret_bytes
+    end
+    @testset "Duplicate x-coordinates rejected" begin
+        shares = shamir_share(big(123), 3, 5)
+        @test_throws ArgumentError shamir_reconstruct([shares[1], shares[2], shares[1]], 3)
     end
 end
 
