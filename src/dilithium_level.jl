@@ -737,7 +737,7 @@ function prehash_message(msg::Vector{UInt8}, hash_alg::String)::Vector{UInt8}
     elseif hash_alg == "SHA3-256"
         return Keccak.sha3_256(msg)
     elseif hash_alg == "SHA3-384"
-        return SHA.sha3_384(msg)
+        return Keccak.sha3_384(msg)
     elseif hash_alg == "SHA3-512"
         return Keccak.sha3_512(msg)
     elseif hash_alg == "SHAKE-128"
@@ -747,7 +747,7 @@ function prehash_message(msg::Vector{UInt8}, hash_alg::String)::Vector{UInt8}
     elseif hash_alg == "SHA2-224"
         return SHA.sha224(msg)
     elseif hash_alg == "SHA3-224"
-        return SHA.sha3_224(msg)
+        return Keccak.sha3_224(msg)
     elseif hash_alg == "SHA2-512/224"
         return SHA.sha2_512_224(msg)
     elseif hash_alg == "SHA2-512/256"

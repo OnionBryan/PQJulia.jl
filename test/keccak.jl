@@ -11,6 +11,8 @@ using SHA
         d = rand(UInt8, len)
         K.sha3_256(d) == SHA.sha3_256(d) || (bad += 1)
         K.sha3_512(d) == SHA.sha3_512(d) || (bad += 1)
+        K.sha3_224(d) == SHA.sha3_224(d) || (bad += 1)
+        K.sha3_384(d) == SHA.sha3_384(d) || (bad += 1)
         for out in (0, 1, 32, 64, 135, 136, 137, 167, 168, 169, 672, 840)
             K.shake128(d, out) == SHA.shake128(d, UInt64(out)) || (bad += 1)
             K.shake256(d, out) == SHA.shake256(d, UInt64(out)) || (bad += 1)

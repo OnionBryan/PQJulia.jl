@@ -90,7 +90,7 @@ function kyber_polyvec_compress!(r::AbstractVector{UInt8},
                                  a::Vector{Vector{Int16}},
                                  k::Int)
     idx = firstindex(r)
-    checkbounds(r, idx:idx + KYBER_POLYVECCOMPRESSEDBYTES - 1)
+    checkbounds(r, idx:idx + k * (KYBER_POLYVECCOMPRESSEDBYTES ÷ KYBER_K) - 1)
     if KYBER_DU == 10
         # d=10: 4 coefficients → 5 bytes (ML-KEM-512, ML-KEM-768)
         for i in 1:k
@@ -135,7 +135,7 @@ function kyber_polyvec_decompress!(r::Vector{Vector{Int16}},
                                    a::AbstractVector{UInt8},
                                    k::Int)
     idx = firstindex(a)
-    checkbounds(a, idx:idx + KYBER_POLYVECCOMPRESSEDBYTES - 1)
+    checkbounds(a, idx:idx + k * (KYBER_POLYVECCOMPRESSEDBYTES ÷ KYBER_K) - 1)
     if KYBER_DU == 10
         # d=10: 5 bytes → 4 coefficients
         for i in 1:k

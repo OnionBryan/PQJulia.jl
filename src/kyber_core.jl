@@ -42,13 +42,14 @@ const KYBER_ZETAS = Int16[
 
 # ── Montgomery Reduce ────────────────────────────────────────────────────────
 # Input:  a in Int32 with |a| ≤ 2^30 (any product of two Int16 values)
-# Output: a * R^{-1} mod q in Int16; in {-(q-1), ..., q-1} when |a| ≤ q*2^15
+# Output: a * R^{-1} mod q in Int16; in {-(q-1), ..., q-1} when -q*2^15 ≤ a < q*2^15
 # Mirrors pq-crystals/kyber/ref/reduce.c:16-23.
 #
 # |t*q| ≤ 2^15 * 3329 < 2^27, so a - t*q stays inside Int32 for |a| ≤ 2^30 and the
 # C code's signed arithmetic does not overflow. Every caller is fqmul on a twiddle,
-# a Montgomery constant or a basemul operand, all of which keep |a| ≤ q*2^15, the
-# range on which the result is already centered (no final reduction is needed).
+# a Montgomery constant (|ζ|, 1353, 1441 ≤ 1664, against any Int16) or a basemul
+# operand (≤ 4095), so |a| ≤ max(1664*2^15, 4095^2) < q*2^15: inside the C reference's
+# range {-q*2^15, ..., q*2^15-1}, on which the result is already centered.
 
 @inline function montgomery_reduce(a::Int32)::Int16
     t = (a % Int16) * KYBER_QINV              # truncate to Int16, multiply (wraps)

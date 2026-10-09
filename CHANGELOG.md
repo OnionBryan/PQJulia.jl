@@ -8,10 +8,11 @@ Medians on one x86-64 core, each scheme in a fresh process; outputs are unchange
 
 - Keccak-f[1600] in the package (`src/keccak.jl`): the 25-lane state is an immutable tuple and
   the round is straight-line code with constant rotations. SHAKE128 (672 bytes) takes 2.1 µs
-  against 5.9 µs in SHA.jl, and the state leaves no heap copy. SHA.jl remains for the SHA-2
-  pre-hashes of HashML-DSA.
+  against 5.9 µs in SHA.jl, and the state leaves no heap copy. Every SHAKE and SHA3 call goes
+  through it, including the SHA3 pre-hashes of HashML-DSA; SHA.jl remains for the SHA-2 ones.
 - ML-KEM: `montgomery_reduce` drops the trailing `rem` by q, a no-op for every operand the
-  scheme produces (|a| ≤ q·2¹⁵, checked on all ACVP, Wycheproof and CCTV vectors); basemul
+  scheme produces (inside the C reference's range −q·2¹⁵ ≤ a < q·2¹⁵, checked on all ACVP,
+  Wycheproof and CCTV vectors); basemul
   works on scalars instead of SubArrays; compression no longer allocates per 8 coefficients;
   NTT, sampling and packing loops check bounds once. 3.0–3.5× at every level.
 - ML-DSA: pointwise multiply-accumulate in one pass, bounds checked once in the NTT, sampling

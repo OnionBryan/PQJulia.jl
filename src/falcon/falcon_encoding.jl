@@ -28,7 +28,7 @@ function compress(s::AbstractVector{<:Integer}, slen::Int)
     end
     return out                                                 # zero padding up to slen
 end
-@inline _setbit!(out, p, nbits) = p <= nbits && (@inbounds out[(p + 7) >> 3] |= 0x80 >> ((p - 1) & 7))
+@inline _setbit!(out, p, nbits) = 1 <= p <= nbits && (@inbounds out[(p + 7) >> 3] |= 0x80 >> ((p - 1) & 7))
 
 # Bit i (1-based, MSB-first) of str.
 @inline _bit(str, o, i) = @inbounds (str[o + ((i - 1) >> 3)] >> (7 - ((i - 1) & 7))) & 0x01 == 0x01

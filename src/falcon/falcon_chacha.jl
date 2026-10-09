@@ -57,6 +57,7 @@ end
 # over the previous 512 bytes in place.
 function refill!(r::ChaCha20)
     buf = r.buf
+    checkbounds(buf, 1:512)
     for i in 1:8
         blk = block(r.s, r.ctr); r.ctr += 1
         @inbounds for w in 1:16

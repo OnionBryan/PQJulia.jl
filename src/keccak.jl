@@ -1,12 +1,12 @@
 """
-Keccak-f[1600] and the FIPS 202 functions the package uses: SHAKE128, SHAKE256, SHA3-256 and
-SHA3-512. The 25-lane state is an immutable tuple, so it stays in registers and on the stack and
+Keccak-f[1600] and the FIPS 202 functions the package uses: SHAKE128, SHAKE256 and SHA3-224/256/
+384/512. The 25-lane state is an immutable tuple, so it stays in registers and on the stack and
 leaves no heap copy; the round function is straight-line code with constant rotation counts.
 Byte-identical to SHA.jl (test/keccak.jl).
 """
 module Keccak
 
-export shake128, shake256, sha3_256, sha3_512
+export shake128, shake256, sha3_224, sha3_256, sha3_384, sha3_512
 
 const State = NTuple{25,UInt64}
 
@@ -122,8 +122,12 @@ end
 shake128(data::AbstractVector{UInt8}, outlen::Integer) = squeeze(Val(168), absorb(Val(168), 0x1f, data), Int(outlen))
 "SHAKE256(data, outlen) (FIPS 202)."
 shake256(data::AbstractVector{UInt8}, outlen::Integer) = squeeze(Val(136), absorb(Val(136), 0x1f, data), Int(outlen))
+"SHA3-224(data) (FIPS 202)."
+sha3_224(data::AbstractVector{UInt8}) = squeeze(Val(144), absorb(Val(144), 0x06, data), 28)
 "SHA3-256(data) (FIPS 202)."
 sha3_256(data::AbstractVector{UInt8}) = squeeze(Val(136), absorb(Val(136), 0x06, data), 32)
+"SHA3-384(data) (FIPS 202)."
+sha3_384(data::AbstractVector{UInt8}) = squeeze(Val(104), absorb(Val(104), 0x06, data), 48)
 "SHA3-512(data) (FIPS 202)."
 sha3_512(data::AbstractVector{UInt8}) = squeeze(Val(72), absorb(Val(72), 0x06, data), 64)
 
