@@ -154,11 +154,13 @@ include("falcon_certify.jl")
 include("falcon_mrm.jl")
 include("falcon_fxp.jl")
 include("falcon_fpr.jl")
+include("falcon_hardening.jl")
 include("vectors_extra.jl")
 
 # ==================== X25519 and X-Wing ====================
 
 include("x25519_xwing.jl")
+include("attack_regressions.jl")
 include("wipe.jl")
 
 @testset "FN-DSA API ($(M.IDENTIFIER))" for M in (FNDSA.Falcon512, FNDSA.Falcon1024)

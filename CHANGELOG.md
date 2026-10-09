@@ -2,6 +2,48 @@
 
 ## Unreleased
 
+### Security
+
+- Falcon key expansion computes each ffLDL leaf σ/√d twice, the second time on an operand passed
+  through an empty asm statement, and refuses the key if the results differ: one glitch in this
+  square root, followed by typically 1–2×10⁶ signatures, recovers the key (Kaihara et al., ePrint
+  2026/2046). Key expansion is 2–2.5% slower.
+- Falcon signing (`falcon_sign`, `falcon_mrm_sign`) re-checks, branch-free, that every leaf of the
+  expanded key lies in [σmin, σmax] before each signature (2.6 µs at n = 512, 6.6 µs at n = 1024,
+  about 0.06% of signing). A wiped `ExpandedKey` now raises `ArgumentError` instead of resampling
+  forever. Signatures are unchanged bit for bit (`test/falcon_hardening.jl`).
+
+### Tests
+
+- `test/attack_regressions.jl`:
+  - ML-KEM decapsulation of a one-bit flip in every ciphertext byte, at all three levels and
+    through X-Wing, returns exactly SHAKE256(z ‖ c′, 32); the last c₂ coefficient is swept through
+    all values (ePrint 2026/2239). A comparison that skips one middle byte passes the rest of the
+    suite and fails here.
+  - ML-DSA: every `invntt!` input during key generation, signing and verification, recorded by
+    probe modules compiled from the shipped source, stays below q; with the key-generation or
+    verification reduction removed it reaches 2–3q and the test fails (a missing key-generation
+    reduction previously passed the whole suite). The reduce/inverse-NTT sequence is also checked
+    against a schoolbook product on sign-aligned inputs that overflow Int32 without the reduction
+    (ePrint 2026/1032).
+  - The public `dilithium_sign` and `dilithium_sign_prehash` with `hedged=false` reproduce the 90
+    deterministic ACVP SigGen vectors, which previously reached only the `_derand` and internal
+    entry points (Bernstein, ML-DSA bug study, 2026).
+
+### Documentation
+
+- SECURITY.md separates timing from physical side channels: no code is masked, and the published
+  profiled attacks on Falcon signing are cited (ePrint 2026/2124, 2025/2159, 2026/1366, 2026/2170),
+  together with the fault and corruption checks above.
+- SECURITY.md: X25519 offers no protection against a quantum adversary (2026 Shor-ECDLP resource
+  estimates, arXiv 2603.28846, 2607.13816, 2609.05625); X-Wing's post-quantum security rests on
+  ML-KEM-768. The skipped all-zero X25519 check is justified by the X-Wing proof (ePrint 2024/039).
+- README: binary64 precision of the Falcon signer (TWFalcon, TCHES 2026); expand the key once for
+  repeated signing, with the fault trade-off; the points ePrint 2026/420 leaves open for
+  FALCON-MRM and PQJulia's choices.
+- FIPS 206 is described as forthcoming (no NIST draft or final text as of 2026-10-09); X-Wing as an
+  individual Internet-Draft in the Independent Submission stream.
+
 ### Performance
 
 Medians on one x86-64 core, each scheme in a fresh process; outputs are unchanged bit for bit.

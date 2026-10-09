@@ -1,6 +1,10 @@
 """
-X-Wing: the X25519 + ML-KEM-768 hybrid KEM of draft-connolly-cfrg-xwing-kem-11 §5.
-IND-CCA if either X25519 (gap-CDH) or ML-KEM-768 is secure, with SHA3 as a random oracle (§6).
+X-Wing: the X25519 + ML-KEM-768 hybrid KEM of draft-connolly-cfrg-xwing-kem-11 (§5), an
+individual Internet-Draft in the Independent Submission stream since -07 (2025-05-26); -11
+refreshed the expired -10 with no normative change.
+IND-CCA if either X25519 (gap-CDH) or ML-KEM-768 is secure, with SHA3 as a random oracle (§6;
+proof in ePrint 2024/039). Against a quantum adversary, security rests on ML-KEM-768 (with
+SHA3-256 as a PRF), not on X25519.
 Keys and ciphertexts are the draft's fixed-length byte strings.
 """
 module XWing

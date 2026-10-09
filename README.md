@@ -9,11 +9,17 @@ ML-DSA (FIPS 204), and Falcon, the NTRU-lattice signature NIST is standardizing 
 |----------|-----------|----------------|
 | FIPS 203 | ML-KEM (Kyber) | 512 / 768 / 1024 |
 | FIPS 204 | ML-DSA (Dilithium) | 44 / 65 / 87 — pure, HashML-DSA, internal and external-μ interfaces |
-| FN-DSA (draft FIPS 206) | Falcon (round-3 spec v1.2) | Falcon-512 / Falcon-1024 |
+| FN-DSA (forthcoming FIPS 206) | Falcon (round-3 spec v1.2) | Falcon-512 / Falcon-1024 |
 | RFC 7748 | X25519 | Curve25519 Diffie–Hellman |
 | draft-connolly-cfrg-xwing-kem-11 | X-Wing | X25519 + ML-KEM-768 hybrid KEM |
 
 Also includes Shamir (k,n)-threshold secret sharing over GF(2^521 − 1).
+
+FIPS 206 and X-Wing are not final. NIST's publication listings show no FIPS 206 text, draft or
+final, as of 2026-10-09; PQJulia implements the round-3 Falcon specification, with options for the
+changes in NIST's 2025 status update ([SECURITY.md](SECURITY.md#fips-206)). X-Wing is an
+individual Internet-Draft, in the Independent Submission stream since revision -07 (2025-05-26);
+-11 (2026-09-23) refreshed the expired -10 with no normative change.
 
 ## Validation
 
@@ -36,7 +42,7 @@ Everything below runs in CI (`Pkg.test()`):
     matches the exact negacyclic product. The fixed-point GS check agrees with the exact GS
     norm, and every generated key passes the NTRU equation and the certificate.
   - **Message recovery (FALCON-MRM).** Tested for round trips, tampering and the sizes of
-    ePrint 2026/420.
+    ePrint 2026/420, which publishes no test vectors ([below](#message-recovery-falcon-mrm)).
 - **Wycheproof** (C2SP): 2,863 ML-DSA and ML-KEM edge-case vectors, including malformed keys
   and hints, out-of-range secret keys, boundary norms, and modulus-overflow encapsulation keys.
 - **X25519:** the RFC 7748 vectors (including 1,000 iterations; 1,000,000 with
@@ -87,6 +93,45 @@ precision on random operands, so the integer signer reproduces the 120 round-3 s
 bit, and it matches the hardware floating-point signer, kept as a reference, on random keys at
 every degree. Signing takes about 2.6 ms for Falcon-512 on an Apple M5, six times the hardware
 floating-point signer.
+
+Being bit-exact, the signer also has binary64's precision. Falcon's Rényi-divergence argument
+covers 2^64 signing queries at λ = 256 only if the combined error in the sampler's center and
+width is at most 2^-46. Over 100,000 Falcon-1024 signatures, binary64 reaches 2^-37 (median
+2^-43), for which the argument covers about 2^47 queries in the worst observed case and 2^59 at
+the median; integer emulation, hardware doubles and 53-bit MPFR give the same errors (Halmans et
+al., [TWFalcon](https://tches.iacr.org/index.php/TCHES/article/view/12892), TCHES 2026). No
+attack exploiting this is known, and the proof may not be tight.
+
+For repeated signing, expand the key once with `falcon_expand_sk(sk)` and sign with
+`falcon_sign(msg, ek)` (or `falcon_mrm_sign(M1, M2, ek)`). The byte-key calls `falcon_sign(msg, sk)` and
+`falcon_mrm_sign(M1, M2, sk)` decode and expand the key on every call, like the reference
+`sign_dyn`. Key expansion is what the single-trace power attack of
+[ePrint 2025/2159](https://eprint.iacr.org/2025/2159) targets, and the byte-key calls run it once
+per signature rather than once per key; reuse narrows that exposure but does not remove it
+([SECURITY.md](SECURITY.md#physical-side-channels)). For faults the trade-off runs the other
+way: one glitch in key expansion's square root biases every signature later made from that
+expanded key, and ePrint 2026/2046 recovers the key from typically 1–2×10⁶ of them. Key
+expansion therefore computes each ffLDL leaf twice and refuses the key if the two differ, and
+every signature re-checks that the leaves lie in [σmin, σmax]. An `ExpandedKey` holds the decoded key, its
+FFT basis and the ffLDL tree: it is secret material, not to be stored or sent with public data,
+and `falcon_wipe!(ek)` zeroes it.
+
+### Message recovery (FALCON-MRM)
+
+ePrint 2026/420 fixes the parameters, sizes, 14-bit packing of ℤ_q vectors and the signing,
+verification and bit-encoding algorithms, which PQJulia follows. It publishes no test vectors and
+leaves the points below open. PQJulia's choices are its own, so its FALCON-MRM signatures will not
+interoperate with other implementations until a revision of the specification fixes them.
+
+| Left open by the specification | PQJulia (`src/falcon/falcon_mrm.jl`) |
+|---|---|
+| Domain-separation tags of H1, H2 | `"PQJulia FALCON-MRM H1"`, `"PQJulia FALCON-MRM H2"` (`FalconMRM.TAG_H1`, `TAG_H2`), prefixed to the HashToPoint input |
+| Framing of H1's input (ρ, M1, M2) | ρ ‖ M1 packed as one 14-bit stream, then M2 |
+| Byte encoding of M2 (a bit string in the specification) | M2 is a byte vector |
+| Header byte | 0x70 + log₂n, the unused cc = 11 value of the round-3 header; signature = header ‖ Compress(s1) ‖ Compress(s2) |
+| Sampling ρ ∈ ℤ_q^γ | 16-bit big-endian draws from the OS CSPRNG, kept below 5q and reduced mod q |
+| Compressed s1 or s2 longer than 625 / 1239 bytes | a new signing attempt, with fresh ρ and sampler seed |
+| M1 coefficients outside [0, q) | rejected by signing |
 
 ## Installation
 
@@ -160,7 +205,8 @@ variants take their randomness explicitly, for testing against known-answer vect
 
 ## Security
 
-[SECURITY.md](SECURITY.md) covers randomness, timing behavior and fixed issues.
+[SECURITY.md](SECURITY.md) covers randomness, timing behavior, physical side channels, the quantum
+exposure of X25519 and fixed issues.
 
 ## Repository layout
 
@@ -176,11 +222,12 @@ variants take their randomness explicitly, for testing against known-answer vect
 - [Falcon specification v1.2](https://falcon-sign.info/falcon.pdf)
 - [pq-crystals reference implementations](https://github.com/pq-crystals)
 - [RFC 7748 — Elliptic Curves for Security (X25519)](https://www.rfc-editor.org/rfc/rfc7748)
-- [X-Wing: general-purpose hybrid post-quantum KEM, draft-connolly-cfrg-xwing-kem-11](https://datatracker.ietf.org/doc/draft-connolly-cfrg-xwing-kem/)
+- [X-Wing: general-purpose hybrid post-quantum KEM, draft-connolly-cfrg-xwing-kem-11](https://datatracker.ietf.org/doc/draft-connolly-cfrg-xwing-kem/) (Internet-Draft, Independent Submission stream)
 - [tprest/falcon.py](https://github.com/tprest/falcon.py)
 - Ducas & Prest, [Fast Fourier Orthogonalization](https://eprint.iacr.org/2015/1014) (ffLDL leaves as Gram–Schmidt norms)
 - Pornin, [Improved Key Pair Generation for Falcon, BAT and Hawk](https://eprint.iacr.org/2023/290) and [ntrugen](https://github.com/pornin/ntrugen) (multi-modular arithmetic, fixed-point keygen)
 - Günther, Lyubashevsky, Schmidt, [FALCON with message recovery](https://eprint.iacr.org/2026/420)
+- Halmans, van Vredendaal, Schneider, Custers, Güneysu, [TWFalcon: Triple-Word Arithmetic for Falcon](https://tches.iacr.org/index.php/TCHES/article/view/12892) (TCHES 2026; ePrint 2025/1991)
 - Perlner, [FIPS 206 Status Update](https://csrc.nist.gov/presentations/2025/fips-206-fn-dsa-falcon) (NIST, 2025)
 
 ## License

@@ -356,10 +356,16 @@ function preimage(gs::NamedTuple, c, t0, t1, σmin, r)
     c .- v0, .-v1
 end
 
+# Leaf range of the integer signer's tree, re-checked before every signature (FalconFpr.check_leaves);
+# the Float64 reference signer checks once, in sign_setup.
+check_leaves(gs::FP.Setup, σmin) = FP.check_leaves(gs, σmin)
+check_leaves(gs::NamedTuple, σmin) = gs
+
 # ── Sign (spec Alg. 10): one salt, then resample until short and encodable ──
 # Each attempt seeds a fresh ChaCha20 from `randombytes`, as the reference does.
 function sign_poly(sk, gs, msg::AbstractVector{UInt8}; randombytes=sysrandom)
     n = sk.n; p = params(n)
+    check_leaves(gs, p.σmin)
     salt = randombytes(SALT_LEN)
     c = hash_to_point(msg, salt, n)
     t0, t1 = target(gs, c)
