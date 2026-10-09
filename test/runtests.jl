@@ -11,6 +11,10 @@ isdir(KAT_DIR) || error("KAT directory not found at $KAT_DIR — the ACVP vector
 h(x) = hex2bytes(x)
 groups(file, pred) = [g for g in JSON.parsefile(joinpath(KAT_DIR, file))["testGroups"] if pred(g)]
 
+# ==================== Keccak (FIPS 202) ====================
+
+include("keccak.jl")
+
 # ==================== ML-KEM (FIPS 203) ====================
 
 @testset "ML-KEM Roundtrip (all levels)" begin
@@ -150,11 +154,13 @@ include("falcon_certify.jl")
 include("falcon_mrm.jl")
 include("falcon_fxp.jl")
 include("falcon_fpr.jl")
+include("falcon_hardening.jl")
 include("vectors_extra.jl")
 
 # ==================== X25519 and X-Wing ====================
 
 include("x25519_xwing.jl")
+include("attack_regressions.jl")
 include("wipe.jl")
 
 @testset "FN-DSA API ($(M.IDENTIFIER))" for M in (FNDSA.Falcon512, FNDSA.Falcon1024)
@@ -179,6 +185,13 @@ end
 # ==================== Shamir ====================
 
 @testset "Shamir Secret Sharing" begin
+    @testset "mod_inverse" begin
+        @test PQJulia.mod_inverse(3, 11) == 4
+        @test PQJulia.mod_inverse(10, 17) == 12
+        @test PQJulia.mod_inverse(-3, 11) == 7
+        @test_throws ArgumentError PQJulia.mod_inverse(2, 4)
+        @test_throws ArgumentError PQJulia.mod_inverse(3, 9)
+    end
     @testset "Basic roundtrip" begin
         for secret in [0, 1, 42, 1000, big(2)^126]
             shares = shamir_share(secret, 3, 5)
@@ -195,6 +208,10 @@ end
         secret_bytes = rand(UInt8, 32)
         shares = shamir_share_bytes(secret_bytes, 3, 5)
         @test shamir_reconstruct_bytes(shares, 3, 32) == secret_bytes
+    end
+    @testset "Duplicate x-coordinates rejected" begin
+        shares = shamir_share(big(123), 3, 5)
+        @test_throws ArgumentError shamir_reconstruct([shares[1], shares[2], shares[1]], 3)
     end
 end
 

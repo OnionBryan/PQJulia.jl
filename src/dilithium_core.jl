@@ -52,35 +52,36 @@ const ZETAS = Int32[
 
 # ==================== REDUCE ====================
 
-function montgomery_reduce(a::Int64)::Int32
+@inline function montgomery_reduce(a::Int64)::Int32
     t = (a % Int32) * QINV  # wrapping multiply
     return Int32((a - Int64(t) * Int64(Q)) >> 32)
 end
 
-function reduce32(a::Int32)::Int32
+@inline function reduce32(a::Int32)::Int32
     t = (a + (Int32(1) << 22)) >> 23
     return a - t * Q
 end
 
-function caddq(a::Int32)::Int32
+@inline function caddq(a::Int32)::Int32
     return a + ((a >> 31) & Q)
 end
 
-function freeze(a::Int32)::Int32
+@inline function freeze(a::Int32)::Int32
     return caddq(reduce32(a))
 end
 
 # ==================== NTT ====================
 
 function ntt!(a::Vector{Int32})
+    checkbounds(a, 1:N)
     k = 1  # 1-indexed: zetas[1]=0 (unused), start at k=1 then pre-increment
     len = 128
     while len >= 1
         start = 0
         while start < N
             k += 1
-            zeta = ZETAS[k]
-            for j in start:(start + len - 1)
+            zeta = @inbounds ZETAS[k]
+            @inbounds for j in start:(start + len - 1)
                 t = montgomery_reduce(Int64(zeta) * Int64(a[j + len + 1]))
                 a[j + len + 1] = a[j + 1] - t
                 a[j + 1] = a[j + 1] + t
@@ -94,14 +95,15 @@ end
 
 function invntt!(a::Vector{Int32})
     f = Int32(41978)  # mont^2/256
+    checkbounds(a, 1:N)
     k = N + 1  # 1-indexed: start at 257, pre-decrement
     len = 1
     while len < N
         start = 0
         while start < N
             k -= 1
-            zeta = -ZETAS[k]
-            for j in start:(start + len - 1)
+            zeta = -@inbounds ZETAS[k]
+            @inbounds for j in start:(start + len - 1)
                 t = a[j + 1]
                 a[j + 1] = t + a[j + len + 1]
                 a[j + len + 1] = t - a[j + len + 1]
@@ -111,7 +113,7 @@ function invntt!(a::Vector{Int32})
         end
         len <<= 1
     end
-    for j in 1:N
+    @inbounds for j in 1:N
         a[j] = montgomery_reduce(Int64(f) * Int64(a[j]))
     end
     return a
@@ -128,35 +130,51 @@ end
 # ==================== POLY OPS ====================
 
 function poly_pointwise!(c::Vector{Int32}, a::Vector{Int32}, b::Vector{Int32})
-    for i in 1:N
+    checkbounds(c, 1:N); checkbounds(a, 1:N); checkbounds(b, 1:N)
+    @inbounds for i in 1:N
         c[i] = montgomery_reduce(Int64(a[i]) * Int64(b[i]))
     end
     return c
 end
 
+# c += a∘b: poly_pointwise! into a temporary followed by poly_add!, in one pass.
+function poly_pointwise_acc!(c::Vector{Int32}, a::Vector{Int32}, b::Vector{Int32})
+    checkbounds(c, 1:N); checkbounds(a, 1:N); checkbounds(b, 1:N)
+    @inbounds for i in 1:N
+        c[i] += montgomery_reduce(Int64(a[i]) * Int64(b[i]))
+    end
+    return c
+end
+
 function poly_add!(c::Vector{Int32}, a::Vector{Int32}, b::Vector{Int32})
-    for i in 1:N; c[i] = a[i] + b[i]; end; return c
+    checkbounds(c, 1:N); checkbounds(a, 1:N); checkbounds(b, 1:N)
+    @inbounds for i in 1:N; c[i] = a[i] + b[i]; end; return c
 end
 
 function poly_sub!(c::Vector{Int32}, a::Vector{Int32}, b::Vector{Int32})
-    for i in 1:N; c[i] = a[i] - b[i]; end; return c
+    checkbounds(c, 1:N); checkbounds(a, 1:N); checkbounds(b, 1:N)
+    @inbounds for i in 1:N; c[i] = a[i] - b[i]; end; return c
 end
 
 function poly_reduce!(a::Vector{Int32})
-    for i in 1:N; a[i] = reduce32(a[i]); end; return a
+    checkbounds(a, 1:N)
+    @inbounds for i in 1:N; a[i] = reduce32(a[i]); end; return a
 end
 
 function poly_caddq!(a::Vector{Int32})
-    for i in 1:N; a[i] = caddq(a[i]); end; return a
+    checkbounds(a, 1:N)
+    @inbounds for i in 1:N; a[i] = caddq(a[i]); end; return a
 end
 
 function poly_shiftl!(a::Vector{Int32})
-    for i in 1:N; a[i] <<= D; end; return a
+    checkbounds(a, 1:N)
+    @inbounds for i in 1:N; a[i] <<= D; end; return a
 end
 
 function poly_chknorm(a::Vector{Int32}, bound::Int32)::Bool
     bound > div(Q - 1, 8) && return true
-    for i in 1:N
+    checkbounds(a, 1:N)
+    @inbounds for i in 1:N
         t = a[i] >> 31
         t = a[i] - (t & (2 * a[i]))
         t >= bound && return true
@@ -172,12 +190,13 @@ function poly_uniform!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
     input = vcat(seed, UInt8[nonce & 0xff, (nonce >> 8) & 0xff])
     nblocks = (768 + 168 - 1) ÷ 168  # = 5
     total_out = nblocks * 168         # = 840
-    buf = SHA.shake128(input, UInt64(total_out))
+    buf = Keccak.shake128(input, UInt64(total_out))
     buflen = total_out
 
     # First rejection pass
+    checkbounds(a, 1:N)
     ctr = 0; pos = 1
-    while ctr < N && pos + 2 <= buflen
+    @inbounds while ctr < N && pos + 2 <= buflen
         t = UInt32(buf[pos]) | (UInt32(buf[pos+1]) << 8) | (UInt32(buf[pos+2]) << 16)
         t &= 0x7FFFFF
         pos += 3
@@ -191,7 +210,7 @@ function poly_uniform!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
     while ctr < N
         off = buflen % 3  # carry trailing bytes that form an incomplete triple
         new_total = total_out + 168
-        full_stream = SHA.shake128(input, UInt64(new_total))
+        full_stream = Keccak.shake128(input, UInt64(new_total))
         new_buf = Vector{UInt8}(undef, 168 + off)
         for i in 1:off
             new_buf[i] = buf[buflen - off + i]

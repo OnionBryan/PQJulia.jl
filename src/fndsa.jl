@@ -1,6 +1,6 @@
 """
 Falcon / FN-DSA — NTRU-lattice hash-and-sign signatures (Falcon round-3 spec v1.2,
-the basis of NIST's draft FIPS 206). Generates FNDSA.Falcon512 and FNDSA.Falcon1024.
+the basis of FN-DSA, to be standardized as NIST FIPS 206). Generates FNDSA.Falcon512 and FNDSA.Falcon1024.
 The math-level implementation for every degree n = 2..1024 lives in FNDSA.Falcon.
 """
 module FNDSA

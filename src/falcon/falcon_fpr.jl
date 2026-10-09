@@ -10,6 +10,7 @@ module FalconFpr
 
 import ..FalconFFT as FF
 import ..FalconSampler as FS
+import ..FalconChaCha as CC
 import ...Wipe: wipe!
 
 # ── binary64 as raw bits ────────────────────────────────────────────────────
@@ -216,9 +217,10 @@ chalf(a::CF) = CF(half(a.re), half(a.im))
 cdiv_real(a::CF, b::CF) = (t = div(ONE, b.re); CF(mul(a.re, t), mul(a.im, t)))
 
 # ── FFT over ℝ[x]/(xⁿ+1), as FalconFFT ──────────────────────────────────────
-const ROOTS = Dict{Int,Vector{CF}}()
-const ROOTS_LOCK = ReentrantLock()
-roots(n) = lock(() -> get!(() -> cf.(FF.roots(n)), ROOTS, n), ROOTS_LOCK)
+# ζ for n = 2, 4, …, 1024, converted once from FalconFFT.roots (public constants). A table
+# rather than a locked Dict: split_fft and merge_fft run at every node of the ffSampling tree.
+const ROOT_TABLE = [cf.(FF.roots(1 << k)) for k in 1:10]
+roots(n) = ROOT_TABLE[trailing_zeros(n)]
 
 function split_fft(F::Vector{CF})
     n = length(F); h = n ÷ 2; ζ = roots(n)
@@ -266,21 +268,44 @@ struct Node
     t1::Union{Node,Leaf}
 end
 
-function ffldl(g00::Vector{CF}, g01::Vector{CF}, g11::Vector{CF}, σ::Fpr)
+# Empty asm that returns its operand: the compiler cannot prove the result equal to the input.
+opaque(x::UInt64) = Base.llvmcall("""%r = call i64 asm sideeffect "", "=r,0"(i64 %0)
+ret i64 %r""", UInt64, Tuple{UInt64}, x)
+opaque(x::Fpr) = Fpr(opaque(x.b))
+
+# Leaf value σ/√d, computed twice: one glitch in this sqrt at key expansion, followed by typically
+# 1–2×10⁶ signatures with the faulty tree, recovers the key (Kaihara et al., ePrint 2026/2046, §4).
+# The second evaluation reads d through `opaque`, so the two are not merged. Returns the value
+# and the XOR of the two results' bits, zero unless an evaluation went wrong.
+function leafsigma(σ::Fpr, d::Fpr, d2::Fpr=opaque(d))
+    a = div(σ, sqrt(d)); b = div(σ, sqrt(d2))
+    a, a.b ⊻ b.b
+end
+
+# `fault` accumulates (OR) the leafsigma differences; the caller decides once, at the end.
+# `leaf` is leafsigma except in tests, which inject a faulty evaluation.
+function ffldl(g00::Vector{CF}, g01::Vector{CF}, g11::Vector{CF}, σ::Fpr, fault::Base.RefValue{UInt64},
+               leaf::L=leafsigma) where {L}
     n = length(g00)
     l10 = [cdiv_real(cconj(g01[i]), g00[i]) for i in 1:n]
     d11 = [csub(g11[i], cmul(cmul(l10[i], cconj(l10[i])), g00[i])) for i in 1:n]
     if n > 2
         a0, a1 = split_fft(g00); b0, b1 = split_fft(d11)
-        node = Node(l10, ffldl(a0, a1, a0, σ), ffldl(b0, b1, b0, σ))
+        node = Node(l10, ffldl(a0, a1, a0, σ, fault, leaf), ffldl(b0, b1, b0, σ, fault, leaf))
         wipe!(d11, a0, a1, b0, b1)
         return node
     end
-    node = Node(l10, Leaf(div(σ, sqrt(g00[1].re))), Leaf(div(σ, sqrt(d11[1].re))))
+    v0, e0 = leaf(σ, g00[1].re); v1, e1 = leaf(σ, d11[1].re)
+    fault[] |= e0 | e1
+    node = Node(l10, Leaf(v0), Leaf(v1))
     wipe!(d11)
     node
 end
 leaves(T, out=Float64[]) = T isa Leaf ? push!(out, Float64(T.σ)) : (leaves(T.t0, out); leaves(T.t1, out))
+# 1 if a leaf lies outside [lo, hi] (NaN included), else 0. Every leaf is compared with `lt` and
+# the results are OR-ed, with no branch on a leaf value; the walk follows the tree's shape, fixed by n.
+leafbad(T::Leaf, lo::Fpr, hi::Fpr) = (lt(T.σ, lo) | lt(hi, T.σ)) % UInt64
+leafbad(T::Node, lo::Fpr, hi::Fpr) = leafbad(T.t0, lo, hi) | leafbad(T.t1, lo, hi)
 wipe!(T::Leaf) = (T.σ = ZERO; T)
 wipe!(T::Node) = (wipe!(T.l10); wipe!(T.t0); wipe!(T.t1); T)
 
@@ -306,12 +331,19 @@ function berexp(x::Fpr, ccs::Fpr, r)
     w < 0
 end
 
-# FalconSampler.basesampler and single bytes, with the randomness wiped after use.
+# FalconSampler.basesampler and single bytes. ChaCha20 is read in place (its buffer is wiped
+# with the generator); other sources go through copies that are wiped after use.
+byte(r::CC.ChaCha20) = CC.randbyte(r)
 byte(r) = (b = FS.randbytes(r, 1); v = b[1]; wipe!(b); v)
-function basesampler(r)
+u72(r::CC.ChaCha20) = CC.randu72(r)
+function u72(r)
     bytes = FS.randbytes(r, 9)
     u = UInt128(0); for i in 1:9; u |= UInt128(bytes[i]) << (8 * (i - 1)); end
     wipe!(bytes)
+    u
+end
+function basesampler(r)
+    u = u72(r)
     z0 = 0
     @inbounds for c in FS.RCDT; z0 += Int(u < c); end
     z0
@@ -337,22 +369,34 @@ end
 
 gram(a, b, c, d) = [cadd(cmul(a[i], cconj(c[i])), cmul(b[i], cconj(d[i]))) for i in eachindex(a)]
 
-"Signing data for `sk`; refuses keys with an ffLDL leaf outside [σmin, σmax]."
-function setup(sk, σ::Float64, σmin::Float64)
+"""Signing data for `sk`; refuses keys with an ffLDL leaf outside [σmin, σmax], and throws if
+the two evaluations of a leaf differ (a fault during expansion)."""
+function setup(sk, σ::Float64, σmin::Float64; leaf=leafsigma)
     pg, pf, pG, pF = fpr_of.(sk.g), neg.(fpr_of.(sk.f)), fpr_of.(sk.G), neg.(fpr_of.(sk.F))
     b00, b01, b10, b11 = fft(pg), fft(pf), fft(pG), fft(pF)
     wipe!(pg, pf, pG, pF)
     g00 = gram(b00, b01, b00, b01); g01 = gram(b00, b01, b10, b11); g11 = gram(b10, b11, b10, b11)
-    T = ffldl(g00, g01, g11, fpr(σ))
+    fault = Ref(UInt64(0))
+    T = ffldl(g00, g01, g11, fpr(σ), fault, leaf)
     wipe!(g00, g01, g11)
-    lo, hi = fpr(σmin), fpr(FS.MAX_SIGMA)
-    ok = all(v -> !lt(v, lo) && !lt(hi, v), leafvals(T))
-    ok || (wipe!(T); wipe!(b00, b01, b10, b11);
-           throw(ArgumentError("Falcon key has an ffLDL leaf outside [σmin, σmax]; refusing to sign")))
+    bad = leafbad(T, fpr(σmin), fpr(FS.MAX_SIGMA))
+    if (fault[] | bad) != 0
+        wipe!(T); wipe!(b00, b01, b10, b11)
+        fault[] == 0 || error("Falcon key expansion: the two evaluations of an ffLDL leaf differ; refusing to sign")
+        throw(ArgumentError("Falcon key has an ffLDL leaf outside [σmin, σmax]; refusing to sign"))
+    end
     Setup(b00, b01, b10, b11, T)
 end
-leafvals(T, out=Fpr[]) = T isa Leaf ? push!(out, T.σ) : (leafvals(T.t0, out); leafvals(T.t1, out))
 wipe!(gs::Setup) = (wipe!(gs.b00, gs.b01, gs.b10, gs.b11); wipe!(gs.T); gs)
+
+# Before each signature: the leaves of an expanded key may have changed since setup (memory
+# corruption, a fault, or a wiped key, whose zero leaves would make signing loop forever).
+"Throw `ArgumentError` unless every ffLDL leaf of `gs` lies in [σmin, σmax]; branch-free up to that decision."
+function check_leaves(gs::Setup, σmin::Float64)
+    leafbad(gs.T, fpr(σmin), fpr(FS.MAX_SIGMA)) == 0 ||
+        throw(ArgumentError("Falcon expanded key has an ffLDL leaf outside [σmin, σmax]; refusing to sign"))
+    gs
+end
 
 const Q = fpr(12289.0)
 function target(gs::Setup, c::AbstractVector{<:Integer})

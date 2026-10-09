@@ -1,12 +1,17 @@
 """
-X-Wing: the X25519 + ML-KEM-768 hybrid KEM of draft-connolly-cfrg-xwing-kem-11 §5.
-IND-CCA if either X25519 (gap-CDH) or ML-KEM-768 is secure, with SHA3 as a random oracle (§6).
+X-Wing: the X25519 + ML-KEM-768 hybrid KEM of draft-connolly-cfrg-xwing-kem-11 (§5), an
+individual Internet-Draft in the Independent Submission stream since -07 (2025-05-26); -11
+refreshed the expired -10 with no normative change.
+IND-CCA if either X25519 (gap-CDH) or ML-KEM-768 is secure, with SHA3 as a random oracle (§6;
+proof in ePrint 2024/039). Against a quantum adversary, security rests on ML-KEM-768 (with
+SHA3-256 as a PRF), not on X25519.
 Keys and ciphertexts are the draft's fixed-length byte strings.
 """
 module XWing
 
 using SHA, Random
 using ..Wipe: wipe!
+import ..Keccak
 import ..MLKEM.Category3 as MK
 import ..X25519: x25519, x25519_base
 
@@ -22,7 +27,7 @@ const LABEL = UInt8[0x5c, 0x2e, 0x2f, 0x2f, 0x5e, 0x5c]          # "\./" ‖ "/^
 function expand(sk::AbstractVector{UInt8})
     length(sk) == SK_BYTES || throw(ArgumentError("X-Wing decapsulation key must be $SK_BYTES bytes"))
     s = collect(sk)
-    e = SHA.shake256(s, UInt64(96))
+    e = Keccak.shake256(s, UInt64(96))
     dz = e[1:64]
     pkM, skM = MK.kyber_kem_keypair_derand(dz)
     skX = e[65:96]
@@ -33,7 +38,7 @@ end
 # §5.3
 function combiner(ssM, ssX, ctX, pkX)
     inp = vcat(ssM, ssX, ctX, pkX, LABEL)
-    ss = SHA.sha3_256(inp)
+    ss = Keccak.sha3_256(inp)
     wipe!(inp)
     ss
 end

@@ -29,8 +29,9 @@ end
 
 # Rejection sampling, C ref rej_eta.
 function rej_eta!(a, offset, len, buf, buflen)
+    checkbounds(a, offset+1:offset+len); checkbounds(buf, 1:buflen)
     ctr = 0; pos = 1
-    while ctr < len && pos <= buflen
+    @inbounds while ctr < len && pos <= buflen
         t0 = UInt32(buf[pos]) & 0x0F
         t1 = UInt32(buf[pos]) >> 4
         pos += 1
@@ -65,13 +66,13 @@ function poly_uniform_eta!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
     input = vcat(seed, UInt8[nonce & 0xff, (nonce >> 8) & 0xff])
     nblocks_init = ETA == 2 ? 1 : 2
     total_out = nblocks_init * 136
-    buf = SHA.shake256(input, UInt64(total_out))
+    buf = Keccak.shake256(input, UInt64(total_out))
     ctr = rej_eta!(a, 0, N, buf, total_out)
 
     # Re-squeeze loop: one SHAKE256 block at a time
     while ctr < N
         new_total = total_out + 136
-        full = SHA.shake256(input, UInt64(new_total))
+        full = Keccak.shake256(input, UInt64(new_total))
         blk = full[total_out+1:new_total]
         total_out = new_total
         ctr += rej_eta!(a, ctr, N - ctr, blk, 136)
@@ -84,7 +85,7 @@ end
 
 function poly_uniform_gamma1!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
     input = vcat(seed, UInt8[nonce & 0xff, (nonce >> 8) & 0xff])
-    buf = SHA.shake256(input, UInt64(POLYZ_PACKED))
+    buf = Keccak.shake256(input, UInt64(POLYZ_PACKED))
     polyz_unpack!(a, buf)
     wipe!(input, buf)
     return a
@@ -94,7 +95,7 @@ function poly_challenge!(c::Vector{Int32}, seed::Vector{UInt8})
     # SampleInBall (C ref: poly.c:487-519). Uses incremental SHAKE256 squeeze.
     fill!(c, Int32(0))
     total_out = 136  # one SHAKE256 block
-    buf = SHA.shake256(seed, UInt64(total_out))
+    buf = Keccak.shake256(seed, UInt64(total_out))
     signs = UInt64(0)
     for i in 0:7
         signs |= UInt64(buf[i+1]) << (8*i)
@@ -106,7 +107,7 @@ function poly_challenge!(c::Vector{Int32}, seed::Vector{UInt8})
             # Re-squeeze if buffer exhausted (C ref: poly.c:509-512)
             if pos > length(buf)
                 new_total = total_out + 136
-                full = SHA.shake256(seed, UInt64(new_total))
+                full = Keccak.shake256(seed, UInt64(new_total))
                 buf = vcat(buf, full[total_out+1:new_total])
                 total_out = new_total
             end
@@ -123,8 +124,9 @@ end
 # ==================== PACKING ====================
 
 function polyt1_pack(a::Vector{Int32})::Vector{UInt8}
+    checkbounds(a, 1:N)
     r = zeros(UInt8, POLYT1_PACKED)
-    for i in 0:(N÷4 - 1)
+    @inbounds for i in 0:(N÷4 - 1)
         r[5i+1] = (a[4i+1]) % UInt8
         r[5i+2] = ((a[4i+1] >> 8) | (a[4i+2] << 2)) % UInt8
         r[5i+3] = ((a[4i+2] >> 6) | (a[4i+3] << 4)) % UInt8
@@ -135,7 +137,8 @@ function polyt1_pack(a::Vector{Int32})::Vector{UInt8}
 end
 
 function polyt1_unpack!(r::Vector{Int32}, a::Vector{UInt8})
-    for i in 0:(N÷4 - 1)
+    checkbounds(r, 1:N); checkbounds(a, 1:POLYT1_PACKED)
+    @inbounds for i in 0:(N÷4 - 1)
         r[4i+1] = Int32((UInt32(a[5i+1]) | (UInt32(a[5i+2]) << 8)) & 0x3FF)
         r[4i+2] = Int32(((UInt32(a[5i+2]) >> 2) | (UInt32(a[5i+3]) << 6)) & 0x3FF)
         r[4i+3] = Int32(((UInt32(a[5i+3]) >> 4) | (UInt32(a[5i+4]) << 4)) & 0x3FF)
@@ -145,15 +148,16 @@ function polyt1_unpack!(r::Vector{Int32}, a::Vector{UInt8})
 end
 
 function polyeta_pack(a::Vector{Int32})::Vector{UInt8}
+    checkbounds(a, 1:N)
     r = zeros(UInt8, POLYETA_PACKED)
     if ETA == 4
-        for i in 0:(N÷2 - 1)
+        @inbounds for i in 0:(N÷2 - 1)
             t0 = (ETA - a[2i+1]) % UInt8
             t1 = (ETA - a[2i+2]) % UInt8
             r[i+1] = t0 | (t1 << 4)
         end
     elseif ETA == 2
-        for i in 0:(N÷8 - 1)
+        @inbounds for i in 0:(N÷8 - 1)
             t = ntuple(j -> (ETA - a[8i+j]) % UInt8, 8)
             r[3i+1] = t[1] | (t[2] << 3) | (t[3] << 6)
             r[3i+2] = (t[3] >> 2) | (t[4] << 1) | (t[5] << 4) | (t[6] << 7)
@@ -164,13 +168,14 @@ function polyeta_pack(a::Vector{Int32})::Vector{UInt8}
 end
 
 function polyeta_unpack!(r::Vector{Int32}, a::AbstractVector{UInt8})
+    checkbounds(r, 1:N); checkbounds(a, 1:POLYETA_PACKED)
     if ETA == 4
-        for i in 0:(N÷2 - 1)
+        @inbounds for i in 0:(N÷2 - 1)
             r[2i+1] = Int32(ETA) - Int32(a[i+1] & 0x0F)
             r[2i+2] = Int32(ETA) - Int32(a[i+1] >> 4)
         end
     elseif ETA == 2
-        for i in 0:(N÷8 - 1)
+        @inbounds for i in 0:(N÷8 - 1)
             r[8i+1] = Int32(a[3i+1]) & 7
             r[8i+2] = (Int32(a[3i+1]) >> 3) & 7
             r[8i+3] = ((Int32(a[3i+1]) >> 6) | (Int32(a[3i+2]) << 2)) & 7
@@ -188,10 +193,11 @@ function polyeta_unpack!(r::Vector{Int32}, a::AbstractVector{UInt8})
 end
 
 function polyz_pack(a::Vector{Int32})::Vector{UInt8}
+    checkbounds(a, 1:N)
     r = zeros(UInt8, POLYZ_PACKED)
     if GAMMA1 == Int32(1 << 19)
         # 20-bit packing: 2 coefficients -> 5 bytes
-        for i in 0:(N÷2 - 1)
+        @inbounds for i in 0:(N÷2 - 1)
             t0 = UInt32(GAMMA1 - a[2i+1])
             t1 = UInt32(GAMMA1 - a[2i+2])
             r[5i+1] = (t0) % UInt8
@@ -202,7 +208,7 @@ function polyz_pack(a::Vector{Int32})::Vector{UInt8}
         end
     elseif GAMMA1 == Int32(1 << 17)
         # 18-bit packing: 4 coefficients -> 9 bytes
-        for i in 0:(N÷4 - 1)
+        @inbounds for i in 0:(N÷4 - 1)
             t0 = UInt32(GAMMA1 - a[4i+1])
             t1 = UInt32(GAMMA1 - a[4i+2])
             t2 = UInt32(GAMMA1 - a[4i+3])
@@ -221,15 +227,16 @@ function polyz_pack(a::Vector{Int32})::Vector{UInt8}
     return r
 end
 function polyz_unpack!(r::Vector{Int32}, a::Vector{UInt8})
+    checkbounds(r, 1:N); checkbounds(a, 1:POLYZ_PACKED)
     if GAMMA1 == Int32(1 << 19)
-        for i in 0:(N÷2 - 1)
+        @inbounds for i in 0:(N÷2 - 1)
             r[2i+1] = Int32(UInt32(a[5i+1]) | (UInt32(a[5i+2]) << 8) | (UInt32(a[5i+3]) << 16)) & Int32(0xFFFFF)
             r[2i+2] = Int32((UInt32(a[5i+3]) >> 4) | (UInt32(a[5i+4]) << 4) | (UInt32(a[5i+5]) << 12)) & Int32(0xFFFFF)
             r[2i+1] = GAMMA1 - r[2i+1]
             r[2i+2] = GAMMA1 - r[2i+2]
         end
     elseif GAMMA1 == Int32(1 << 17)
-        for i in 0:(N÷4 - 1)
+        @inbounds for i in 0:(N÷4 - 1)
             r[4i+1] = Int32(UInt32(a[9i+1]) | (UInt32(a[9i+2]) << 8) | (UInt32(a[9i+3]) << 16)) & Int32(0x3FFFF)
             r[4i+2] = Int32((UInt32(a[9i+3]) >> 2) | (UInt32(a[9i+4]) << 6) | (UInt32(a[9i+5]) << 14)) & Int32(0x3FFFF)
             r[4i+3] = Int32((UInt32(a[9i+5]) >> 4) | (UInt32(a[9i+6]) << 4) | (UInt32(a[9i+7]) << 12)) & Int32(0x3FFFF)
@@ -240,15 +247,16 @@ function polyz_unpack!(r::Vector{Int32}, a::Vector{UInt8})
     return r
 end
 function polyw1_pack(a::Vector{Int32})::Vector{UInt8}
+    checkbounds(a, 1:N)
     r = zeros(UInt8, POLYW1_PACKED)
     if GAMMA2 == Int32(div(Q - 1, 32))
         # 4-bit: 2 coefficients per byte (w1 range 0..15)
-        for i in 0:(N÷2 - 1)
+        @inbounds for i in 0:(N÷2 - 1)
             r[i+1] = (a[2i+1] | (a[2i+2] << 4)) % UInt8
         end
     elseif GAMMA2 == Int32(div(Q - 1, 88))
         # 6-bit: 4 coefficients per 3 bytes (w1 range 0..43)
-        for i in 0:(N÷4 - 1)
+        @inbounds for i in 0:(N÷4 - 1)
             r[3i+1] = (a[4i+1] | (a[4i+2] << 6)) % UInt8
             r[3i+2] = ((a[4i+2] >> 2) | (a[4i+3] << 4)) % UInt8
             r[3i+3] = ((a[4i+3] >> 4) | (a[4i+4] << 2)) % UInt8
@@ -258,8 +266,9 @@ function polyw1_pack(a::Vector{Int32})::Vector{UInt8}
 end
 function polyt0_pack(a::Vector{Int32})::Vector{UInt8}
     # 13-bit packing: 8 coefficients → 13 bytes. C ref: packing.c:664-702
+    checkbounds(a, 1:N)
     r = zeros(UInt8, POLYT0_PACKED)
-    for i in 0:(N÷8 - 1)
+    @inbounds for i in 0:(N÷8 - 1)
         ts = ntuple(k -> UInt32((1 << (D-1)) - a[8i+k]), 8)
         r[13i+1]  = (ts[1]) % UInt8
         r[13i+2]  = ((ts[1] >> 8) | (ts[2] << 5)) % UInt8
@@ -279,7 +288,8 @@ function polyt0_pack(a::Vector{Int32})::Vector{UInt8}
 end
 function polyt0_unpack!(r::Vector{Int32}, a::AbstractVector{UInt8})
     # 13-bit unpacking: 13 bytes → 8 coefficients. C ref: packing.c:712-763
-    for i in 0:(N÷8 - 1)
+    checkbounds(r, 1:N); checkbounds(a, 1:POLYT0_PACKED)
+    @inbounds for i in 0:(N÷8 - 1)
         r[8i+1] = Int32(UInt32(a[13i+1]) | (UInt32(a[13i+2]) << 8)) & Int32(0x1FFF)
         r[8i+2] = Int32((UInt32(a[13i+2]) >> 5) | (UInt32(a[13i+3]) << 3) | (UInt32(a[13i+4]) << 11)) & Int32(0x1FFF)
         r[8i+3] = Int32((UInt32(a[13i+4]) >> 2) | (UInt32(a[13i+5]) << 6)) & Int32(0x1FFF)
@@ -297,7 +307,7 @@ end
 function dilithium_keygen_derand(xi::Vector{UInt8})
     length(xi) == SEEDBYTES || throw(ArgumentError("keygen seed must be $SEEDBYTES bytes"))
     seed = vcat(xi, UInt8[K, L])
-    expanded = SHA.shake256(seed, UInt64(2*SEEDBYTES + CRHBYTES))
+    expanded = Keccak.shake256(seed, UInt64(2*SEEDBYTES + CRHBYTES))
     rho = expanded[1:SEEDBYTES]
     rhoprime = expanded[SEEDBYTES+1:SEEDBYTES+CRHBYTES]
     key = expanded[SEEDBYTES+CRHBYTES+1:2*SEEDBYTES+CRHBYTES]
@@ -322,26 +332,21 @@ function dilithium_keygen_derand(xi::Vector{UInt8})
     s1hat = [copy(s) for s in s1]
     for i in 1:L; ntt!(s1hat[i]); end
 
-    t = [zeros(Int32, N) for _ in 1:K]
-    tmp = zeros(Int32, N)
-    for i in 1:K
-        fill!(t[i], Int32(0))
-        for j in 1:L
-            poly_pointwise!(tmp, A[i,j], s1hat[j])
-            poly_add!(t[i], t[i], tmp)
-        end
-        poly_reduce!(t[i])
-        invntt!(t[i])
-        poly_add!(t[i], t[i], s2[i])
-        poly_caddq!(t[i])
-    end
-
-    # power2round: t = t1*2^D + t0
+    # One row of t at a time, split by power2round: t = t1*2^D + t0
+    t = zeros(Int32, N)
     t1 = [zeros(Int32, N) for _ in 1:K]
     t0 = [zeros(Int32, N) for _ in 1:K]
     for i in 1:K
+        fill!(t, Int32(0))
+        for j in 1:L
+            poly_pointwise_acc!(t, A[i,j], s1hat[j])
+        end
+        poly_reduce!(t)
+        invntt!(t)
+        poly_add!(t, t, s2[i])
+        poly_caddq!(t)
         for j in 1:N
-            t1[i][j], t0[i][j] = power2round(t[i][j])
+            t1[i][j], t0[i][j] = power2round(t[j])
         end
     end
 
@@ -350,7 +355,7 @@ function dilithium_keygen_derand(xi::Vector{UInt8})
     for i in 1:K; append!(pk, polyt1_pack(t1[i])); end
 
     # tr = H(pk)
-    tr = SHA.shake256(pk, UInt64(TRBYTES))
+    tr = Keccak.shake256(pk, UInt64(TRBYTES))
 
     # Pack sk = rho || key || tr || s1 || s2 || t0
     sk = append!(sizehint!(UInt8[], SK_BYTES), rho, key, tr)   # no regrowth copies
@@ -363,7 +368,7 @@ function dilithium_keygen_derand(xi::Vector{UInt8})
     for i in 1:K
         e = polyt0_pack(t0[i]); append!(sk, e); wipe!(e)
     end
-    wipe!(seed, expanded, rhoprime, key, s1, s2, s1hat, t, t0, tmp)
+    wipe!(seed, expanded, rhoprime, key, s1, s2, s1hat, t, t0)
 
     return pk, sk
 end
@@ -418,8 +423,7 @@ function compute_w!(w1::Vector{Vector{Int32}}, w0::Vector{Vector{Int32}}, A::Mat
     for i in 1:K
         fill!(w1[i], Int32(0))
         for j in 1:L
-            poly_pointwise!(tmp, A[i,j], zy[j])
-            poly_add!(w1[i], w1[i], tmp)
+            poly_pointwise_acc!(w1[i], A[i,j], zy[j])
         end
         poly_reduce!(w1[i])
         invntt!(w1[i])
@@ -438,7 +442,7 @@ end
 function compute_challenge(mu::Vector{UInt8}, w1::Vector{Vector{Int32}}, cp::Vector{Int32})
     w1_packed = UInt8[]
     for i in 1:K; append!(w1_packed, polyw1_pack(w1[i])); end
-    c_tilde = SHA.shake256(vcat(mu, w1_packed), UInt64(CTILDEBYTES))
+    c_tilde = Keccak.shake256(vcat(mu, w1_packed), UInt64(CTILDEBYTES))
     poly_challenge!(cp, c_tilde)
     cp_hat = copy(cp); ntt!(cp_hat)
     return c_tilde, cp_hat
@@ -539,7 +543,7 @@ function sign_mu(mu::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8})
     for i in 1:K; ntt!(t0[i]); end
 
     kin = vcat(key, rnd, mu)
-    rhoprime = SHA.shake256(kin, UInt64(CRHBYTES))
+    rhoprime = Keccak.shake256(kin, UInt64(CRHBYTES))
 
     nonce = 0  # Int, not UInt16 — avoids overflow at 9362 iterations for L=7 (pq-crystals/dilithium#110)
     y = [zeros(Int32, N) for _ in 1:L]
@@ -570,7 +574,7 @@ function sign_mu(mu::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8})
 end
 
 sk_tr(sk::Vector{UInt8}) = sk[2*SEEDBYTES+1:2*SEEDBYTES+TRBYTES]
-mu_of(tr::Vector{UInt8}, mprime::Vector{UInt8}) = SHA.shake256(vcat(tr, mprime), UInt64(CRHBYTES))
+mu_of(tr::Vector{UInt8}, mprime::Vector{UInt8}) = Keccak.shake256(vcat(tr, mprime), UInt64(CRHBYTES))
 
 # M′ for pure ML-DSA (FIPS 204 Alg. 2/3): 0x00 ‖ |ctx| ‖ ctx ‖ M.
 pure_mprime(msg, context) = vcat(UInt8[0x00, UInt8(length(context))], context, msg)
@@ -650,19 +654,19 @@ function dilithium_verify_mu(mu::Vector{UInt8}, sig::Vector{UInt8}, pk::Vector{U
         poly_chknorm(z[i], GAMMA1 - BETA) && return false
     end
 
-    # Expand A, compute w1' = Az - c*t1*2^D
+    # w1' = Az - c*t1*2^D
     cp = zeros(Int32, N)
     poly_challenge!(cp, c_tilde)
-    A = expand_A(rho)
 
     for i in 1:L; ntt!(z[i]); end
     w1p = [zeros(Int32, N) for _ in 1:K]
     tmp = zeros(Int32, N)
+    # Each A[i,j] is used once, so expand it into tmp one entry at a time
     for i in 1:K
         fill!(w1p[i], Int32(0))
         for j in 1:L
-            poly_pointwise!(tmp, A[i,j], z[j])
-            poly_add!(w1p[i], w1p[i], tmp)
+            poly_uniform!(tmp, rho, UInt16((i-1) << 8 | (j-1)))
+            poly_pointwise_acc!(w1p[i], tmp, z[j])
         end
     end
 
@@ -687,7 +691,7 @@ function dilithium_verify_mu(mu::Vector{UInt8}, sig::Vector{UInt8}, pk::Vector{U
     # Recompute challenge
     w1_packed = UInt8[]
     for i in 1:K; append!(w1_packed, polyw1_pack(w1p[i])); end
-    c2 = SHA.shake256(vcat(mu, w1_packed), UInt64(CTILDEBYTES))
+    c2 = Keccak.shake256(vcat(mu, w1_packed), UInt64(CTILDEBYTES))
 
     return c_tilde == c2
 end
@@ -695,7 +699,7 @@ end
 """ML-DSA.Verify_internal (FIPS 204 Alg. 8) on the formatted message M′."""
 function dilithium_verify_internal(mprime::Vector{UInt8}, sig::Vector{UInt8}, pk::Vector{UInt8})
     length(pk) != PK_BYTES && return false
-    return dilithium_verify_mu(mu_of(SHA.shake256(pk, UInt64(TRBYTES)), mprime), sig, pk)
+    return dilithium_verify_mu(mu_of(Keccak.shake256(pk, UInt64(TRBYTES)), mprime), sig, pk)
 end
 
 """ML-DSA.Verify (FIPS 204 Alg. 3). A context over 255 bytes is rejected (returns false)."""
@@ -731,19 +735,19 @@ function prehash_message(msg::Vector{UInt8}, hash_alg::String)::Vector{UInt8}
     elseif hash_alg == "SHA2-512"
         return SHA.sha512(msg)
     elseif hash_alg == "SHA3-256"
-        return SHA.sha3_256(msg)
+        return Keccak.sha3_256(msg)
     elseif hash_alg == "SHA3-384"
-        return SHA.sha3_384(msg)
+        return Keccak.sha3_384(msg)
     elseif hash_alg == "SHA3-512"
-        return SHA.sha3_512(msg)
+        return Keccak.sha3_512(msg)
     elseif hash_alg == "SHAKE-128"
-        return SHA.shake128(msg, UInt64(32))  # 256 bits
+        return Keccak.shake128(msg, UInt64(32))  # 256 bits
     elseif hash_alg == "SHAKE-256"
-        return SHA.shake256(msg, UInt64(64))  # 512 bits
+        return Keccak.shake256(msg, UInt64(64))  # 512 bits
     elseif hash_alg == "SHA2-224"
         return SHA.sha224(msg)
     elseif hash_alg == "SHA3-224"
-        return SHA.sha3_224(msg)
+        return Keccak.sha3_224(msg)
     elseif hash_alg == "SHA2-512/224"
         return SHA.sha2_512_224(msg)
     elseif hash_alg == "SHA2-512/256"

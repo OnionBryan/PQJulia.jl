@@ -1,5 +1,13 @@
-# FALCON-MRM, ePrint 2026/420. Not fixed by the spec: TAG_H1/TAG_H2, header 0x70 + log₂n,
-# the check 0 ≤ M1ᵢ < q.
+# FALCON-MRM, ePrint 2026/420. The spec publishes no test vectors and leaves the points below
+# open; the choices are PQJulia's own, so signatures will not interoperate with other
+# implementations until a revision of the spec fixes them.
+#   domain separation  TAG_H1/TAG_H2 prefixed to the HashToPoint input in place of the salt
+#   H1 input framing   pack14(ρ ‖ M1) as one 14-bit stream, then M2
+#   M2                 bytes (the spec allows any bit string)
+#   header byte        0x70 + log₂n (cc = 11, unused in round 3); sig = header ‖ e1 ‖ e2
+#   ρ sampler          16-bit big-endian draws below 5q, reduced mod q (uniform_zq)
+#   compression        either half longer than slen bytes: new attempt, fresh ρ and sampler seed
+#   M1 range           sign rejects M1ᵢ ∉ [0, q)
 module FalconMRM
 
 import ..Falcon
@@ -47,6 +55,7 @@ function sign(M1::AbstractVector{<:Integer}, M2::AbstractVector{UInt8}, ek::Falc
     n = ek.sk.n; (; λ, γ) = params(n); fp = Falcon.params(n); L = slen(n) * 8
     length(M1) == n - λ - γ || throw(ArgumentError("M1 must have $(n - λ - γ) elements of ℤ_q"))
     all(x -> 0 <= x < q, M1) || throw(ArgumentError("M1 elements must lie in [0, q)"))
+    Falcon.check_leaves(ek.gs, fp.σmin)
     while true
         ρ = uniform_zq(γ, randombytes)
         c1 = H1(ρ, M1, M2, λ)

@@ -8,7 +8,8 @@
 # ============================================================================
 module FalconSampler
 
-using SHA, Random
+using Random
+import ...Keccak
 import ..FalconChaCha
 
 export RNG, KATSource, randbytes, samplerz, MAX_SIGMA
@@ -46,7 +47,7 @@ RNG(seed::Vector{UInt8}) = RNG(copy(seed), UInt64(0), UInt8[], 1)
 RNG() = RNG(rand(RandomDevice(), UInt8, 32))
 function _refill!(r::RNG)
     ctrbytes = reinterpret(UInt8, [r.ctr]); r.ctr += 1
-    r.buf = SHA.shake256(vcat(r.seed, ctrbytes), UInt64(512)); r.pos = 1
+    r.buf = Keccak.shake256(vcat(r.seed, ctrbytes), UInt64(512)); r.pos = 1
 end
 function randbytes(r::RNG, k::Int)
     out = Vector{UInt8}(undef, k)
@@ -58,6 +59,17 @@ function randbytes(r::RNG, k::Int)
 end
 
 randbytes(r::FalconChaCha.ChaCha20, k::Int) = FalconChaCha.randbytes(r, k)
+
+# randbytes(r, 1)[1], and the little-endian value of randbytes(r, 9): the same stream positions;
+# the ChaCha20 methods read the keystream buffer in place.
+randbyte(r::FalconChaCha.ChaCha20) = FalconChaCha.randbyte(r)
+randbyte(r) = randbytes(r, 1)[1]
+randu72(r::FalconChaCha.ChaCha20) = FalconChaCha.randu72(r)
+function randu72(r)
+    bytes = randbytes(r, 9)
+    u = UInt128(0); for i in 1:9; u |= UInt128(bytes[i]) << (8 * (i - 1)); end
+    u
+end
 
 # Deterministic KAT randomness: a fixed hex `octets` string consumed exactly like
 # the reference KAT_randbytes (take 2k hex chars, fromhex, byte-reverse).
@@ -73,8 +85,7 @@ const ILN2 = 1.44269504089
 # Base sampler: integer z0 ≥ 0 from the half-Gaussian via the RCDT. u is the
 # LITTLE-endian 72-bit value of randbytes(9) — matches the reference bit-for-bit.
 function basesampler(r)
-    bytes = randbytes(r, 9)
-    u = UInt128(0); for i in 1:9; u |= UInt128(bytes[i]) << (8 * (i - 1)); end
+    u = randu72(r)
     z0 = 0
     @inbounds for c in RCDT; z0 += (u < c) ? 1 : 0; end
     z0
@@ -94,7 +105,7 @@ function berexp(x::Float64, ccs::Float64, r)
     s = Int(floor(x * ILN2)); rr = x - s * LN2; s = min(s, 63)
     z = (approxexp(rr, ccs) - 1) >> s; w = 0
     for i in 56:-8:0
-        p = Int(randbytes(r, 1)[1]); w = p - Int((z >> i) & 0xFF)
+        p = Int(randbyte(r)); w = p - Int((z >> i) & 0xFF)
         w != 0 && break
     end
     return w < 0
@@ -107,7 +118,7 @@ function samplerz(μ::Float64, σ::Float64, σmin::Float64, r)
     dss = 1.0 / (2σ^2); ccs = σmin / σ
     while true
         z0 = basesampler(r)
-        b = Int(randbytes(r, 1)[1]) & 1
+        b = Int(randbyte(r)) & 1
         z = b + (2b - 1) * z0
         x = ((z - rr)^2) * dss - (z0^2) * INV_2SIGMA2
         berexp(x, ccs, r) && return z + s

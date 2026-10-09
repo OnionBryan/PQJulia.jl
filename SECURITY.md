@@ -3,9 +3,10 @@
 ## Scope
 
 A pure-Julia implementation of NIST FIPS 203 (ML-KEM), FIPS 204 (ML-DSA), Falcon (round-3
-specification v1.2, the basis of FN-DSA / FIPS 206), X25519 (RFC 7748) and X-Wing. ML-KEM and
-ML-DSA pass 855 NIST ACVP vectors covering every interface. Falcon signing is byte-exact with
-the round-3 C implementation on 120 reference vectors.
+specification v1.2, the basis of FN-DSA, to be standardized as FIPS 206), X25519 (RFC 7748) and
+X-Wing (an Internet-Draft). ML-KEM and ML-DSA pass 855 NIST ACVP vectors covering every
+interface. Falcon signing is byte-exact with the round-3 C implementation on 120 reference
+vectors.
 
 ## Randomness
 
@@ -18,8 +19,10 @@ the deterministic variant.
 
 ## Timing
 
-Julia compiles through LLVM, which may introduce data-dependent branches; source-level
-constant-time code is not guaranteed to stay constant-time after compilation.
+This section concerns execution time only; power, electromagnetic and fault attacks are covered
+under [Physical side channels](#physical-side-channels). Julia compiles through LLVM, which may
+introduce data-dependent branches; source-level constant-time code is not guaranteed to stay
+constant-time after compilation.
 
 ### Constant-time at the source level
 
@@ -33,7 +36,7 @@ constant-time code is not guaranteed to stay constant-time after compilation.
 | `decompose` (ML-DSA) | Multiply-shift, no division (RUSTSEC-2025-0144 does not apply); GAMMA2 branches are on public constants | dilithium_level.jl |
 | `make_hint` (ML-DSA) | Bitwise `\|`/`&` comparisons; compiles to `setcc`/`csel`, no branches, on x86-64 and AArch64 | dilithium_level.jl |
 | X25519 | Scalar bits from 64-bit words, mask swaps on 51-bit limbs, branch-free canonical encoding | x25519.jl |
-| Falcon signing (key expansion, FFT, ffLDL, ffSampling, SamplerZ) | Integer emulation of binary64 (Pornin's `fpr`): branch-free add, mul, div, sqrt and rounding; no hardware floating point | falcon/falcon_fpr.jl |
+| Falcon signing (key expansion, FFT, ffLDL, ffSampling, SamplerZ) | Integer emulation of binary64 (Pornin's `fpr`): branch-free add, mul, div, sqrt and rounding; no hardware floating point; unmasked | falcon/falcon_fpr.jl |
 
 ### Variable-time
 
@@ -42,9 +45,36 @@ constant-time code is not guaranteed to stay constant-time after compilation.
 | Julia GC pauses, JIT compilation | First call compiles; warm up before timing-sensitive use |
 | `poly_uniform_eta!` (ML-DSA keygen) | Rejection sampling, as in the reference: timing shows which bytes were rejected, and those are independent of the kept coefficients |
 | Matrix expansion (ML-KEM, ML-DSA) | Rejection sampling on the public seed ρ |
-| SHAKE (SHA.jl) | Timing depends on input length, which is public |
+| SHAKE, SHA3 (keccak.jl) | Timing depends on input length, which is public |
 | SamplerZ rejection and BerExp, signature retries (Falcon) | As in the reference: iteration counts and the bytes compared depend on fresh randomness |
 | Falcon keygen (NTRU solver) | BigInt arithmetic; `fixedpoint=true` removes floating point (ePrint 2023/290) |
+
+## Physical side channels
+
+No code is masked, and resistance to an attacker who can measure or perturb the device (power,
+electromagnetic or fault attacks) is out of scope. ML-KEM, ML-DSA, X25519 and X-Wing claim
+nothing beyond the timing behavior above.
+
+Falcon signing is the most exposed. `fpr_of`, `floor` and `mul` in `falcon_fpr.jl`, and
+ffSampling and SamplerZ above them, are branch-free but unmasked: they compute the signs,
+exponent classes and normalization masks of secret values as data, and they port the reference
+C line for line. Published profiled attacks on these operations report key recovery from 20–100
+signatures through the conversion of ⌊μ⌋ at the ffSampling leaves (ePrint 2026/2124), from one
+trace of key expansion (ePrint 2025/2159), and from about 100 signatures through the signs of
+SamplerZ outputs (ePrint 2026/1366); the first and last derive their Falcon figures from
+simulated leakage labels. ePrint 2026/2170 adds a leak through the sign of SamplerZ's input
+center. Signing from an `ExpandedKey` (`falcon_expand_sk`) runs key expansion once per key
+instead of once per signature, which limits but does not remove the exposure to 2025/2159; a
+fault injected during expansion, in contrast, persists in every signature made from that key.
+
+Two checks target faults and corruption of the expanded key. Key expansion computes each ffLDL
+leaf σ/√d twice, the second time on an operand passed through an empty asm statement so that the
+compiler keeps both evaluations, and throws if the two differ: one glitch in this square root
+followed by typically 1–2×10⁶ signatures recovers the key (Kaihara et al., ePrint 2026/2046), and
+the leaf range check alone still leaves 34–65% of keys recoverable. Before every signature the
+signer re-checks, branch-free, that each leaf lies in [σmin, σmax], so a corrupted or wiped
+`ExpandedKey` is refused. Neither check detects a fault that alters both evaluations identically,
+a fault earlier in the FFT or LDL, or a change that leaves a leaf inside [σmin, σmax].
 
 ## Secrets in memory
 
@@ -59,11 +89,12 @@ into storage reserved at full size, so no partial copy is left behind by a reall
 | ML-DSA | keygen seed expansion, ρ′, K, s1, s2, t and t0; the decoded s1, s2 and t0 when signing, K, ρ′, y, z, w0, the hints and the packing buffers of every attempt |
 | X-Wing | the expanded ML-KEM key and X25519 scalar, the encapsulation seed and both partial shared secrets |
 | X25519 | holds its scalar and field elements in immutable tuples, which leave no heap copy |
-| Falcon | the decoded f, g, F, G, the FFT basis and the ffLDL tree whenever the API decodes a byte key for one call; keygen's key once encoded; the signer's FFT and ffSampling arrays, ChaCha20 state and keystream, and SamplerZ's random bytes |
+| SHAKE, SHA3 | the Keccak state is an immutable tuple (keccak.jl), which leaves no heap copy |
+| Falcon | the decoded f, g, F, G, the FFT basis and the ffLDL tree whenever the API decodes a byte key for one call; keygen's key once encoded; the signer's FFT and ffSampling arrays, and the ChaCha20 state and keystream, which SamplerZ reads in place |
 
 What the caller owns stays the caller's to erase: secret keys, returned shared secrets, and an
-expanded Falcon key (`falcon_wipe!(ek)`). `wipe!` is exported for this. Not wiped: the Keccak state
-inside SHA.jl, and BigInt (GMP) values in Falcon keygen and in Shamir. Julia's
+expanded Falcon key (`falcon_wipe!(ek)`). `wipe!` is exported for this. Not wiped: BigInt (GMP)
+values in Falcon keygen and in Shamir. Julia's
 garbage collector does not move
 objects, but it does not lock pages either, so memory can reach swap or a core dump.
 
@@ -91,6 +122,9 @@ objects, but it does not lock pages either, so memory can reach swap or a core d
 | Falcon secret-key decoding inverted NTT coefficients of f with the extended Euclidean algorithm and checked the NTRU equation in BigInt, both variable-time on secret data (dudect \|t\| up to 27.6, AMD EPYC 9B14) | `test/timing/dudect.jl` | Fixed — Fermat inversion with a fixed exponent; NTRU check in Int64 |
 | `make_hint` compiled to conditional branches on x86-64 | Disassembly after a dudect flag (\|t\| 7.4, Intel i7-8086K) | Fixed — bitwise form, branch-free |
 | Falcon signed with any key whose ffLDL leaves passed the GS-norm test only on paper | NIST FIPS 206 status update (Oct 2025) | Fixed — signing refuses keys with a leaf outside [σmin, σmax]; `falcon_keygen(certified=true)` and `falcon_certify` decide the leaf and GS-norm bounds exactly |
+| One fault in the ffLDL leaf square root at key expansion biases every later signature and recovers the key; the leaf range check alone leaves 34–65% of keys recoverable | Kaihara et al., ePrint 2026/2046 (CCS 2026) | Mitigated — each leaf computed twice, expansion refuses the key on a mismatch; leaf range re-checked, branch-free, before every signature ([Physical side channels](#physical-side-channels)) |
+| A decapsulation check that leaves one ciphertext coordinate unverified permits key recovery (no-op `cmov` in pqc_kyber, truncated comparison in wolfSSL) | Das, ePrint 2026/2239 | Not affected — every byte compared, rejection key selected fail-closed; `test/attack_regressions.jl` tampers every ciphertext byte |
+| ML-DSA builds that drop a load-bearing reduction before the inverse NTT overflow Int32 and still pass KATs (wolfSSL small build) | Lee, Lim, Yoon, ePrint 2026/1032 | Not affected — all reductions present; `test/attack_regressions.jl` checks every `invntt!` input during keygen, signing and verification and compares worst-case pipelines with a schoolbook product |
 
 ## Falcon Key Certificate
 
@@ -106,7 +140,9 @@ certifies each candidate key.
 
 ## FIPS 206
 
-`fips206=true` applies the NIST FIPS 206 status update (Perlner, 2025):
+`fips206=true` applies the NIST FIPS 206 status update (Perlner, 2025). NIST's publication
+listings show no FIPS 206 text, draft or final, as of 2026-10-09, so these options may change
+when the standard appears:
 
 - the keygen GS bound 0.9999·1.17√q, decided exactly by the certificate;
 - the signer's refusal of keys with a leaf outside [σmin, σmax];
@@ -116,17 +152,36 @@ certifies each candidate key.
 
 ## FALCON-MRM
 
-FALCON-MRM follows ePrint 2026/420. Implementation choices:
-
-- **Domain-separation tags** for H1 and H2 (`FalconMRM.TAG_H1`, `FalconMRM.TAG_H2`).
-- **Header byte:** 0x70 + log₂n, the unused cc = 11 value of the round-3 header.
+FALCON-MRM follows ePrint 2026/420, which publishes no test vectors and leaves open the
+domain-separation tags of H1 and H2 (`FalconMRM.TAG_H1`, `FalconMRM.TAG_H2`), the framing of
+H1's input, the byte encoding of M2, the header byte, the sampling of ρ and the handling of an overlong
+compressed signature. PQJulia's choices are listed in the
+[README](README.md#message-recovery-falcon-mrm); until a revision of the specification fixes
+them, its FALCON-MRM signatures do not interoperate with other implementations.
 
 ## X25519 and X-Wing
 
 `X25519.x25519` is the RFC 7748 function: it masks the top bit of u, accepts non-canonical u,
 and returns the all-zero value for small-order inputs (Wycheproof `ZeroSharedSecret`). For
-standalone Diffie–Hellman, reject an all-zero result (RFC 7748 §6.1). X-Wing needs no such
-check: its combiner hashes the X25519 ciphertext and public key (draft-11 §6).
+standalone Diffie–Hellman, reject an all-zero result (RFC 7748 §6.1). X-Wing performs no such
+check, and the draft specifies none: its security proof (Barbosa et al., CiC 2024, §7.1) models
+X25519 as the RFC 7748 function on arbitrary 32-byte strings, and the combiner hashes the X25519
+ciphertext and public key.
+
+X25519 gives no protection against a quantum adversary. Shor's algorithm computes elliptic-curve
+discrete logarithms, so X25519 exchanges recorded today can be decrypted once a fault-tolerant
+quantum computer of sufficient size exists (harvest now, decrypt later). 2026 estimates for one
+256-bit prime-field instance are about 1,200–1,450 logical qubits and 40–90 million Toffoli gates
+(Babbush et al., arXiv:2603.28846; Häner et al., arXiv:2609.05625), or 835 logical qubits at
+2^30.9 Toffoli gates (Luo et al., arXiv:2607.13816); Babbush et al. expect many curves with a
+256-bit modulus and group order to cost the same order of magnitude. These are resource estimates for hardware that does
+not exist; no such computation has been carried out, and no classical result weakens X25519.
+X-Wing's post-quantum security rests on ML-KEM-768 (with SHA3-256 as a PRF); X25519 is a
+classical hedge against a failure of ML-KEM.
+
+X-Wing is an individual Internet-Draft, not a CFRG document or an RFC. It has been in the
+Independent Submission stream since revision -07 (2025-05-26); -11 (2026-09-23), which PQJulia
+implements, refreshed the expired -10 with no normative change.
 
 ## Reporting Vulnerabilities
 
@@ -141,3 +196,11 @@ Do not open public issues for security vulnerabilities.
 - [KyberSlash FAQ](https://kyberslash.cr.yp.to/faq.html)
 - [RUSTSEC-2025-0144 — ML-DSA Decompose timing](https://rustsec.org/advisories/RUSTSEC-2025-0144.html)
 - [CVE-2024-37880 — Compiler-introduced branch in poly_frommsg](https://nvd.nist.gov/vuln/detail/CVE-2024-37880)
+- Zhou, Wang, Sun, Yu, [Every Signing Leaks: Breaking Falcon via Floating-Point Conversion Leakage](https://eprint.iacr.org/2026/2124) (ePrint 2026/2124)
+- Li, Ma, Dou, Guo, [One Fell Swoop: A Single-Trace Key-Recovery Attack on the Falcon Signing Algorithm](https://eprint.iacr.org/2025/2159) (ePrint 2025/2159; TCHES 2027)
+- Brinkmann, Kraus, May, [Halfspace Learning for Lattice Signature Key Recovery from Signs](https://eprint.iacr.org/2026/1366) (ePrint 2026/1366; CRYPTO 2026)
+- Kaihara, Abou Haidar, Tibouchi, Abe, [Square Root of All Evil: The Dangers of Falcon's Superfluous Square Roots](https://eprint.iacr.org/2026/2046) (ePrint 2026/2046; ACM CCS 2026)
+- Lin, Tibouchi, Yu, [Swing the Lure: How to Cheaply Mitigate Sign Leakage in Falcon](https://eprint.iacr.org/2026/2170) (ePrint 2026/2170)
+- Barbosa et al., [X-Wing: The Hybrid KEM You've Been Looking For](https://doi.org/10.62056/a3qj89n4e) (IACR Communications in Cryptology 1(1), 2024; ePrint 2024/039)
+- [X-Wing, draft-connolly-cfrg-xwing-kem-11](https://www.ietf.org/archive/id/draft-connolly-cfrg-xwing-kem-11.txt) and its [history](https://datatracker.ietf.org/doc/draft-connolly-cfrg-xwing-kem/history/)
+- Babbush et al., [arXiv:2603.28846](https://arxiv.org/abs/2603.28846); Häner et al. (IonQ), [arXiv:2609.05625](https://arxiv.org/abs/2609.05625); Luo et al., [arXiv:2607.13816](https://arxiv.org/abs/2607.13816) (Shor-ECDLP resource estimates)

@@ -10,7 +10,7 @@
     truncation (never `Int16()` which throws on overflow).
 """
 
-using SHA
+import ..Keccak
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -41,27 +41,20 @@ const KYBER_ZETAS = Int16[
 ]
 
 # ── Montgomery Reduce ────────────────────────────────────────────────────────
-# Input:  a in Int32   (product of two Int16 values * R)
-# Output: a * R^{-1} mod q,  in {-(q-1), ..., q-1}
+# Input:  a in Int32 with |a| ≤ 2^30 (any product of two Int16 values)
+# Output: a * R^{-1} mod q in Int16; in {-(q-1), ..., q-1} when -q*2^15 ≤ a < q*2^15
 # Mirrors pq-crystals/kyber/ref/reduce.c:16-23.
 #
-# The C reference uses Int32 intermediates and documents the input constraint
-# {-q*2^15, ..., q*2^15-1}. However, fqmul passes Int32(a)*Int32(b) where
-# a,b are arbitrary Int16, producing products up to ~10^9 which exceeds that
-# range. The C code relies on signed overflow wrapping on two's-complement
-# machines (technically UB), which Julia does not allow.
-#
-# We widen to Int64 for the subtraction so no overflow occurs.  After the
-# >>16 shift the exact quotient u = (a - t*q)/2^16 satisfies |u| <= 34432
-# (since |a| <= 2^31 and |t*q| <= 32768*3329).  When the input IS in the
-# valid range, |u| < q and rem is a no-op.  For out-of-range inputs the
-# rem(u, q) folds u back into {-(q-1), ..., q-1}, giving a mathematically
-# correct a * R^{-1} mod q for ALL Int32 inputs.
+# |t*q| ≤ 2^15 * 3329 < 2^27, so a - t*q stays inside Int32 for |a| ≤ 2^30 and the
+# C code's signed arithmetic does not overflow. Every caller is fqmul on a twiddle,
+# a Montgomery constant (|ζ|, 1353, 1441 ≤ 1664, against any Int16) or a basemul
+# operand (≤ 4095), so |a| ≤ max(1664*2^15, 4095^2) < q*2^15: inside the C reference's
+# range {-q*2^15, ..., q*2^15-1}, on which the result is already centered.
 
-function montgomery_reduce(a::Int32)::Int16
+@inline function montgomery_reduce(a::Int32)::Int16
     t = (a % Int16) * KYBER_QINV              # truncate to Int16, multiply (wraps)
-    u = (Int64(a) - Int64(t) * Int64(KYBER_Q)) >> 16
-    return rem(u, Int64(KYBER_Q)) % Int16
+    u = (a - Int32(t) * Int32(KYBER_Q)) >> 16
+    return u % Int16
 end
 
 # ── fqmul ────────────────────────────────────────────────────────────────────
@@ -76,7 +69,7 @@ end
 # Output: a mod q, centered in {-(q-1)/2, ..., (q-1)/2}
 # Mirrors pq-crystals/kyber/ref/reduce.c:35-42.
 
-function barrett_reduce(a::Int16)::Int16
+@inline function barrett_reduce(a::Int16)::Int16
     v = Int16(20159)   # floor((1<<26 + q/2) / q)
     t = ((Int32(v) * Int32(a) + (Int32(1) << 25)) >> 26) % Int16
     t = (Int32(t) * Int32(KYBER_Q)) % Int16
@@ -89,14 +82,15 @@ end
 # No Barrett reduce in the forward direction.
 
 function kyber_ntt!(r::Vector{Int16})
+    checkbounds(r, 1:KYBER_N)
     k = 2   # Julia's zetas[2] = C's zetas[1]
     len = 128
     while len >= 2
         start = 0
         while start < 256
-            zeta = KYBER_ZETAS[k]
+            zeta = @inbounds KYBER_ZETAS[k]
             k += 1
-            for j in start:(start + len - 1)
+            @inbounds for j in start:(start + len - 1)
                 t = fqmul(zeta, r[j + len + 1])    # +1 for 1-indexing
                 r[j + len + 1] = r[j + 1] - t
                 r[j + 1]       = r[j + 1] + t
@@ -114,15 +108,16 @@ end
 # Barrett reduce on the addition.  Final scaling by f = 1441 = mont^2/128.
 
 function kyber_invntt!(r::Vector{Int16})
+    checkbounds(r, 1:KYBER_N)
     f = Int16(1441)
     k = 128  # Julia's zetas[128] = C's zetas[127]
     len = 2
     while len <= 128
         start = 0
         while start < 256
-            zeta = KYBER_ZETAS[k]
+            zeta = @inbounds KYBER_ZETAS[k]
             k -= 1
-            for j in start:(start + len - 1)
+            @inbounds for j in start:(start + len - 1)
                 t = r[j + 1]
                 r[j + 1]       = barrett_reduce(t + r[j + len + 1])
                 r[j + len + 1] = r[j + len + 1] - t
@@ -132,7 +127,7 @@ function kyber_invntt!(r::Vector{Int16})
         end
         len <<= 1
     end
-    for j in 1:256
+    @inbounds for j in 1:256
         r[j] = fqmul(r[j], f)
     end
     return r
@@ -172,7 +167,8 @@ Centered binomial distribution with eta=2.
 Produces coefficients in [-2, 2].
 """
 function kyber_cbd2!(r::Vector{Int16}, buf::Vector{UInt8})
-    for i in 0:(KYBER_N ÷ 8 - 1)   # 0:31
+    checkbounds(r, 1:KYBER_N); checkbounds(buf, 1:2KYBER_N÷4)
+    @inbounds for i in 0:(KYBER_N ÷ 8 - 1)   # 0:31
         t = UInt32(buf[4i + 1]) |
             (UInt32(buf[4i + 2]) << 8) |
             (UInt32(buf[4i + 3]) << 16) |
@@ -197,7 +193,8 @@ Centered binomial distribution with eta=3.
 Produces coefficients in [-3, 3].
 """
 function kyber_cbd3!(r::Vector{Int16}, buf::Vector{UInt8})
-    for i in 0:(KYBER_N ÷ 4 - 1)   # 0:63
+    checkbounds(r, 1:KYBER_N); checkbounds(buf, 1:3KYBER_N÷4)
+    @inbounds for i in 0:(KYBER_N ÷ 4 - 1)   # 0:63
         t = UInt32(buf[3i + 1]) |
             (UInt32(buf[3i + 2]) << 8) |
             (UInt32(buf[3i + 3]) << 16)
@@ -214,29 +211,29 @@ function kyber_cbd3!(r::Vector{Int16}, buf::Vector{UInt8})
 end
 
 # ── PRF / XOF / Hash Wrappers ──────────────────────────────────────────────
-# Using Julia's stdlib SHA (SHAKE-128, SHAKE-256, SHA3-256, SHA3-512).
+# SHAKE-128, SHAKE-256, SHA3-256 and SHA3-512 from Keccak (keccak.jl).
 
 """PRF: SHAKE-256(seed || nonce, outlen)"""
 function kyber_prf(seed::Vector{UInt8}, nonce::UInt8, outlen::Int)
     inp = vcat(seed, UInt8[nonce])
-    out = SHA.shake256(inp, UInt64(outlen))
+    out = Keccak.shake256(inp, UInt64(outlen))
     wipe!(inp)
     return out
 end
 
 """XOF: SHAKE-128(seed, outlen)"""
 function kyber_xof(seed::Vector{UInt8}, outlen::Int)
-    return SHA.shake128(seed, UInt64(outlen))
+    return Keccak.shake128(seed, UInt64(outlen))
 end
 
 """Hash H: SHA3-256"""
 function kyber_hash_h(data::Vector{UInt8})
-    return SHA.sha3_256(data)
+    return Keccak.sha3_256(data)
 end
 
 """Hash G: SHA3-512"""
 function kyber_hash_g(data::Vector{UInt8})
-    return SHA.sha3_512(data)
+    return Keccak.sha3_512(data)
 end
 
 # ── Uniform Sampling (Rejection Sampling) ──────────────────────────────────
@@ -254,7 +251,7 @@ function kyber_rej_uniform!(r::Vector{Int16}, buf::Vector{UInt8})
     buflen = length(buf)
     ctr = 0
     pos = 1  # Julia 1-indexed
-    while ctr < len && pos + 2 <= buflen
+    @inbounds while ctr < len && pos + 2 <= buflen
         val0 = (UInt16(buf[pos]) | (UInt16(buf[pos + 1]) << 8)) & 0x0FFF
         val1 = ((UInt16(buf[pos + 1]) >> 4) | (UInt16(buf[pos + 2]) << 4)) & 0x0FFF
         pos += 3
@@ -357,24 +354,16 @@ function kyber_poly_basemul_montgomery!(r::Vector{Int16},
     #   basemul(&r[4i], &a[4i], &b[4i], zetas[64+i]);
     #   basemul(&r[4i+2], &a[4i+2], &b[4i+2], -zetas[64+i]);
     # }
-    # Julia 1-indexed: zetas[64+i] in C = KYBER_ZETAS[65+i] in Julia
-    for i in 0:(KYBER_N ÷ 4 - 1)   # 0:63
+    # Julia 1-indexed: zetas[64+i] in C = KYBER_ZETAS[65+i] in Julia.
+    # kyber_basemul! inlined on scalars: the same fqmul sequence, no SubArrays.
+    checkbounds(r, 1:KYBER_N); checkbounds(a, 1:KYBER_N); checkbounds(b, 1:KYBER_N)
+    @inbounds for i in 0:(KYBER_N ÷ 4 - 1)   # 0:63
         z = KYBER_ZETAS[65 + i]     # C's zetas[64+i]
-        base = 4i + 1               # Julia 1-indexed start
-        # First pair: coeffs [base, base+1]
-        kyber_basemul!(
-            @view(r[base:base+1]),
-            @view(a[base:base+1]),
-            @view(b[base:base+1]),
-            z
-        )
-        # Second pair: coeffs [base+2, base+3] with -zeta
-        kyber_basemul!(
-            @view(r[base+2:base+3]),
-            @view(a[base+2:base+3]),
-            @view(b[base+2:base+3]),
-            -z
-        )
+        for (o, zz) in ((4i + 1, z), (4i + 3, -z))
+            a0, a1, b0, b1 = a[o], a[o + 1], b[o], b[o + 1]
+            r[o]     = fqmul(fqmul(a1, b1), zz) + fqmul(a0, b0)
+            r[o + 1] = fqmul(a0, b1) + fqmul(a1, b0)
+        end
     end
     return r
 end
@@ -410,22 +399,16 @@ d=5: 256 coefficients → 160 bytes
 Mirrors poly.c:poly_compress.
 """
 function kyber_poly_compress!(r_bytes::AbstractVector{UInt8}, a::Vector{Int16}, d::Int)
+    checkbounds(a, 1:KYBER_N)
     if d == 4
         # 8 coefficients → 4 bytes (4 bits each, packed in pairs)
-        idx = 1
-        for i in 0:(KYBER_N ÷ 8 - 1)
-            t = Vector{UInt8}(undef, 8)
-            for j in 0:7
-                u = caddq(a[8i + j + 1])
-                # Optimized Barrett-style: (u << 4) + 1665, * 80635, >> 28
-                # Use `% UInt32` to match C's silent int16_t → uint32_t conversion
-                # (UInt32(u) would throw InexactError on negative Int16)
-                d0 = (u % UInt32) << 4
-                d0 += 1665
-                d0 *= 80635
-                d0 >>= 28
-                t[j + 1] = UInt8(d0 & 0x0f)
-            end
+        checkbounds(r_bytes, firstindex(r_bytes):firstindex(r_bytes) + 127)
+        idx = firstindex(r_bytes)
+        @inbounds for i in 0:(KYBER_N ÷ 8 - 1)
+            # Optimized Barrett-style: (u << 4) + 1665, * 80635, >> 28
+            # Use `% UInt32` to match C's silent int16_t → uint32_t conversion
+            # (UInt32(u) would throw InexactError on negative Int16)
+            t = ntuple(j -> ((((caddq(a[8i + j]) % UInt32) << 4 + 1665) * 80635) >> 28) % UInt8 & 0x0f, Val(8))
             r_bytes[idx]     = t[1] | (t[2] << 4)
             r_bytes[idx + 1] = t[3] | (t[4] << 4)
             r_bytes[idx + 2] = t[5] | (t[6] << 4)
@@ -434,18 +417,11 @@ function kyber_poly_compress!(r_bytes::AbstractVector{UInt8}, a::Vector{Int16}, 
         end
     elseif d == 5
         # 8 coefficients → 5 bytes (5 bits each)
-        idx = 1
-        for i in 0:(KYBER_N ÷ 8 - 1)
-            t = Vector{UInt8}(undef, 8)
-            for j in 0:7
-                u = caddq(a[8i + j + 1])
-                # Use `% UInt32` to match C's silent int16_t → uint32_t conversion
-                d0 = (u % UInt32) << 5
-                d0 += 1664
-                d0 *= 40318
-                d0 >>= 27
-                t[j + 1] = UInt8(d0 & 0x1f)
-            end
+        checkbounds(r_bytes, firstindex(r_bytes):firstindex(r_bytes) + 159)
+        idx = firstindex(r_bytes)
+        @inbounds for i in 0:(KYBER_N ÷ 8 - 1)
+            # (u << 5) + 1664, * 40318, >> 27; `% UInt32` as C's int16_t → uint32_t
+            t = ntuple(j -> ((((caddq(a[8i + j]) % UInt32) << 5 + 1664) * 40318) >> 27) % UInt8 & 0x1f, Val(8))
             r_bytes[idx]     = t[1] | (t[2] << 5)
             r_bytes[idx + 1] = (t[2] >> 3) | (t[3] << 2) | (t[4] << 7)
             r_bytes[idx + 2] = (t[4] >> 1) | (t[5] << 4)
@@ -468,25 +444,28 @@ d=5: 160 bytes → 256 coefficients
 Mirrors poly.c:poly_decompress.
 """
 function kyber_poly_decompress!(r::Vector{Int16}, a_bytes::AbstractVector{UInt8}, d::Int)
+    checkbounds(r, 1:KYBER_N)
+    o = firstindex(a_bytes) - 1
     if d == 4
         # 1 byte → 2 coefficients (low 4 bits, high 4 bits)
-        for i in 0:(KYBER_N ÷ 2 - 1)
-            r[2i + 1] = (((UInt16(a_bytes[i + 1] & 0x0f) * UInt16(KYBER_Q)) + 8) >> 4) % Int16
-            r[2i + 2] = (((UInt16(a_bytes[i + 1] >> 4) * UInt16(KYBER_Q)) + 8) >> 4) % Int16
+        checkbounds(a_bytes, o + 1:o + 128)
+        @inbounds for i in 0:(KYBER_N ÷ 2 - 1)
+            r[2i + 1] = (((UInt16(a_bytes[o + i + 1] & 0x0f) * UInt16(KYBER_Q)) + 8) >> 4) % Int16
+            r[2i + 2] = (((UInt16(a_bytes[o + i + 1] >> 4) * UInt16(KYBER_Q)) + 8) >> 4) % Int16
         end
     elseif d == 5
         # 5 bytes → 8 coefficients
-        idx = 1
-        for i in 0:(KYBER_N ÷ 8 - 1)
-            t = Vector{UInt8}(undef, 8)
-            t[1] = a_bytes[idx]
-            t[2] = (a_bytes[idx] >> 5) | (a_bytes[idx + 1] << 3)
-            t[3] = a_bytes[idx + 1] >> 2
-            t[4] = (a_bytes[idx + 1] >> 7) | (a_bytes[idx + 2] << 1)
-            t[5] = (a_bytes[idx + 2] >> 4) | (a_bytes[idx + 3] << 4)
-            t[6] = a_bytes[idx + 3] >> 1
-            t[7] = (a_bytes[idx + 3] >> 6) | (a_bytes[idx + 4] << 2)
-            t[8] = a_bytes[idx + 4] >> 3
+        checkbounds(a_bytes, o + 1:o + 160)
+        idx = o + 1
+        @inbounds for i in 0:(KYBER_N ÷ 8 - 1)
+            t = (a_bytes[idx],
+                 (a_bytes[idx] >> 5) | (a_bytes[idx + 1] << 3),
+                 a_bytes[idx + 1] >> 2,
+                 (a_bytes[idx + 1] >> 7) | (a_bytes[idx + 2] << 1),
+                 (a_bytes[idx + 2] >> 4) | (a_bytes[idx + 3] << 4),
+                 a_bytes[idx + 3] >> 1,
+                 (a_bytes[idx + 3] >> 6) | (a_bytes[idx + 4] << 2),
+                 a_bytes[idx + 4] >> 3)
             idx += 5
             for j in 1:8
                 r[8i + j] = ((UInt32(t[j] & 0x1f) * UInt32(KYBER_Q) + 16) >> 5) % Int16
@@ -509,7 +488,8 @@ Coefficients are mapped to positive standard representatives first.
 Mirrors poly.c:poly_tobytes.
 """
 function kyber_poly_tobytes!(r::AbstractVector{UInt8}, a::Vector{Int16})
-    for i in 0:(KYBER_N ÷ 2 - 1)
+    checkbounds(a, 1:KYBER_N); checkbounds(r, 1:KYBER_POLYBYTES)
+    @inbounds for i in 0:(KYBER_N ÷ 2 - 1)
         # Map to positive standard representatives
         # Use `% UInt16` to match C's silent int16_t → uint16_t conversion
         t0 = caddq(a[2i + 1]) % UInt16
@@ -528,7 +508,8 @@ Deserialize polynomial from bytes: 384 bytes → 256 coefficients (12 bits each)
 Mirrors poly.c:poly_frombytes.
 """
 function kyber_poly_frombytes!(r::Vector{Int16}, a::AbstractVector{UInt8})
-    for i in 0:(KYBER_N ÷ 2 - 1)
+    checkbounds(r, 1:KYBER_N); checkbounds(a, 1:KYBER_POLYBYTES)
+    @inbounds for i in 0:(KYBER_N ÷ 2 - 1)
         r[2i + 1] = ((UInt16(a[3i + 1]) | (UInt16(a[3i + 2]) << 8)) & 0x0FFF) % Int16
         r[2i + 2] = (((UInt16(a[3i + 2]) >> 4) | (UInt16(a[3i + 3]) << 4)) & 0x0FFF) % Int16
     end
@@ -547,7 +528,8 @@ Mirrors poly.c:poly_frommsg (uses cmov_int16 for constant-time).
 """
 function kyber_poly_frommsg!(r::Vector{Int16}, msg::Vector{UInt8})
     half_q = Int16((Int(KYBER_Q) + 1) ÷ 2)   # 1665
-    for i in 0:(KYBER_N ÷ 8 - 1)
+    checkbounds(r, 1:KYBER_N); checkbounds(msg, 1:KYBER_N ÷ 8)
+    @inbounds for i in 0:(KYBER_N ÷ 8 - 1)
         for j in 0:7
             bit = (msg[i + 1] >> j) & 0x01
             # Constant-time: use mask instead of branch
@@ -567,7 +549,8 @@ Uses the Barrett-style trick from the C reference.
 Mirrors poly.c:poly_tomsg.
 """
 function kyber_poly_tomsg!(msg::Vector{UInt8}, a::Vector{Int16})
-    for i in 0:(KYBER_N ÷ 8 - 1)
+    checkbounds(a, 1:KYBER_N); checkbounds(msg, 1:KYBER_N ÷ 8)
+    @inbounds for i in 0:(KYBER_N ÷ 8 - 1)
         msg[i + 1] = 0x00
         for j in 0:7
             # C reference does NOT call caddq here -- the Barrett-style trick
