@@ -41,6 +41,9 @@ include("wipe.jl")
 using .Wipe
 export wipe!
 
+# Byte concatenation without Base.vcat (see src/bytes.jl)
+include("bytes.jl")
+
 # Keccak-f[1600]: SHAKE128/256 and SHA3-256/512 for every scheme
 include("keccak.jl")
 
