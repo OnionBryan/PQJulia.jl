@@ -170,6 +170,7 @@ include("vectors_extra.jl")
 # ==================== X25519 and X-Wing ====================
 
 include("x25519_xwing.jl")
+include("regressions_mlkem_xwing.jl")
 include("attack_regressions.jl")
 include("wipe.jl")
 
