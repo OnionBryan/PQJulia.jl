@@ -14,6 +14,26 @@ const W = PQJulia.Wipe
     @test occursin("asm sideeffect", ir)                      # the zeroing is not a dead store
 end
 
+@testset "wipe! on views, Memory and invalid input" begin
+    # Contiguous views zero only their own range; strided views of numbers element by element.
+    x = collect(UInt8, 1:64); W.wipe!(view(x, 9:40))
+    @test all(iszero, x[9:40]) && x[1:8] == 1:8 && x[41:64] == 41:64
+    y = collect(Int32, 1:20); W.wipe!(view(y, 2:3:20))
+    @test all(iszero, y[2:3:20]) && all(!iszero, y[setdiff(1:20, 2:3:20)])
+    m = Memory{UInt8}(undef, 16); fill!(m, 0xaa); W.wipe!(m); @test all(iszero, m)
+    r = reshape(collect(Int64, 1:12), 3, 4); W.wipe!(r); @test all(iszero, r)
+    k = rand(UInt8, 48); W.wipe!(view(k, 1:16), view(k, 33:48))
+    @test all(iszero, k[1:16]) && all(iszero, k[33:48])
+    ir = sprint(io -> code_llvm(io, W.wipe!, (SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int}}, true},); debuginfo=:none))
+    @test occursin("asm sideeffect", ir)
+    # Unsupported input is an ArgumentError, never a recursion into a stack overflow.
+    for bad in (0x01, 3, "secret", (1, 2), nothing, [[1], 2])
+        @test_throws ArgumentError W.wipe!(bad)
+    end
+    @test_throws ArgumentError W.wipe!(Any[1, 2])
+    @test W.wipe!() === nothing
+end
+
 @testset "API leaves caller inputs intact" begin
     unchanged(f, xs...) = (cs = deepcopy(xs); f(xs...); all(map(==, cs, xs)))
     for C in (MLKEM.Category1, MLKEM.Category3, MLKEM.Category5)

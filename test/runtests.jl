@@ -147,6 +147,16 @@ end
     @test Cat.dilithium_verify(m, Cat.dilithium_sign_derand(m, sk, zeros(UInt8, 32)), pk)
 end
 
+@testset "ML-DSA invalid input raises ArgumentError" begin
+    Cat = MLDSA.Category3
+    pk, sk = Cat.dilithium_keygen_derand(zeros(UInt8, 32)); msg = UInt8[1, 2, 3]
+    @test_throws ArgumentError Cat.dilithium_sign(msg, sk[1:end-1])
+    @test_throws ArgumentError Cat.dilithium_sign(msg, sk; context=zeros(UInt8, 256))
+    @test_throws ArgumentError Cat.dilithium_sign_derand(msg, sk, zeros(UInt8, 31))
+    @test_throws ArgumentError Cat.dilithium_sign_internal_mu(zeros(UInt8, 63), sk, zeros(UInt8, 32))
+    @test_throws ArgumentError Cat.dilithium_sign_prehash(msg, sk, "MD5")
+end
+
 # ==================== FN-DSA (Falcon) ====================
 
 include("falcon_kat.jl")
@@ -208,6 +218,18 @@ end
         secret_bytes = rand(UInt8, 32)
         shares = shamir_share_bytes(secret_bytes, 3, 5)
         @test shamir_reconstruct_bytes(shares, 3, 32) == secret_bytes
+        # The output has exactly nbytes bytes, leading zero bytes included.
+        for lead in (0, 1, 15, 31)
+            s = vcat(zeros(UInt8, lead), rand(0x01:0xff, 1), rand(UInt8, 31 - lead))
+            r = shamir_reconstruct_bytes(shamir_share_bytes(s, 2, 3), 2, 32)
+            @test length(r) == 32 && r == s
+        end
+        @test shamir_reconstruct_bytes(shamir_share_bytes(zeros(UInt8, 32), 2, 3), 2, 32) == zeros(UInt8, 32)
+        # A secret longer than nbytes, or inconsistent shares, is an error instead of a wrong-length result.
+        @test_throws ArgumentError shamir_reconstruct_bytes(shares, 3, 16)
+        @test_throws ArgumentError shamir_reconstruct_bytes(shares, 3, 0)
+        bad = [shares[1], shares[2], (shares[3][1], shares[3][2] + 1)]
+        @test_throws ArgumentError shamir_reconstruct_bytes(bad, 3, 32)
     end
     @testset "Duplicate x-coordinates rejected" begin
         shares = shamir_share(big(123), 3, 5)

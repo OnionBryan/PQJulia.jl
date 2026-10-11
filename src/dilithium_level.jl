@@ -529,9 +529,9 @@ end
 
 """ML-DSA.Sign_internal core (FIPS 204 Alg. 7) from μ = H(tr ‖ M′). Every signing entry point lands here."""
 function sign_mu(mu::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8})
-    length(mu) == CRHBYTES || error("mu must be $CRHBYTES bytes")
-    length(rnd) == 32 || error("rnd must be 32 bytes")
-    length(sk) == SK_BYTES || error("$IDENTIFIER secret key must be $SK_BYTES bytes")
+    length(mu) == CRHBYTES || throw(ArgumentError("mu must be $CRHBYTES bytes"))
+    length(rnd) == 32 || throw(ArgumentError("rnd must be 32 bytes"))
+    length(sk) == SK_BYTES || throw(ArgumentError("$IDENTIFIER secret key must be $SK_BYTES bytes"))
 
     rho, key, tr, s1, s2, t0 = unpack_sk(sk)
     # skDecode range check: s1, s2 coefficients must lie in [-η, η] (Wycheproof InvalidPrivateKey)
@@ -581,7 +581,7 @@ pure_mprime(msg, context) = vcat(UInt8[0x00, UInt8(length(context))], context, m
 
 """ML-DSA.Sign_internal (FIPS 204 Alg. 7): signs the formatted message M′ as given, no domain separator."""
 function dilithium_sign_internal(mprime::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8})
-    length(sk) == SK_BYTES || error("$IDENTIFIER secret key must be $SK_BYTES bytes")
+    length(sk) == SK_BYTES || throw(ArgumentError("$IDENTIFIER secret key must be $SK_BYTES bytes"))
     return sign_mu(mu_of(sk_tr(sk), mprime), sk, rnd)
 end
 
@@ -594,7 +594,7 @@ dilithium_sign_internal_msg(mprime::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vecto
 
 """ML-DSA.Sign (FIPS 204 Alg. 2) with caller-supplied 32-byte `rnd` (all zeros = deterministic variant)."""
 function dilithium_sign_derand(msg::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8}; context::Vector{UInt8}=UInt8[])
-    length(context) > 255 && error("Context string must be ≤ 255 bytes (FIPS 204 §5.2)")
+    length(context) > 255 && throw(ArgumentError("Context string must be ≤ 255 bytes (FIPS 204 §5.2)"))
     return dilithium_sign_internal(pure_mprime(msg, context), sk, rnd)
 end
 
@@ -753,20 +753,20 @@ function prehash_message(msg::Vector{UInt8}, hash_alg::String)::Vector{UInt8}
     elseif hash_alg == "SHA2-512/256"
         return SHA.sha2_512_256(msg)
     else
-        error("Unsupported hash algorithm: $hash_alg")
+        throw(ArgumentError("Unsupported hash algorithm: $hash_alg"))
     end
 end
 
 # M′ for HashML-DSA (FIPS 204 Alg. 4/5): 0x01 ‖ |ctx| ‖ ctx ‖ OID ‖ PH(M).
 function prehash_mprime(msg::Vector{UInt8}, hash_alg::String, context::Vector{UInt8})
-    haskey(HASH_OIDS, hash_alg) || error("Unknown hash algorithm: $hash_alg")
+    haskey(HASH_OIDS, hash_alg) || throw(ArgumentError("Unknown hash algorithm: $hash_alg"))
     return vcat(UInt8[0x01, UInt8(length(context))], context, HASH_OIDS[hash_alg], prehash_message(msg, hash_alg))
 end
 
 """HashML-DSA.Sign (FIPS 204 Alg. 4) with caller-supplied 32-byte `rnd`."""
 function dilithium_sign_prehash_derand(msg::Vector{UInt8}, sk::Vector{UInt8}, hash_alg::String, rnd::Vector{UInt8};
                                        context::Vector{UInt8}=UInt8[])
-    length(context) > 255 && error("Context string must be ≤ 255 bytes (FIPS 204 §5.2)")
+    length(context) > 255 && throw(ArgumentError("Context string must be ≤ 255 bytes (FIPS 204 §5.2)"))
     return dilithium_sign_internal(prehash_mprime(msg, hash_alg, context), sk, rnd)
 end
 

@@ -17,6 +17,27 @@ function wipe!(x::Array{T}) where {T}
     x
 end
 wipe!(x::Vector{<:Array}) = (foreach(wipe!, x); x)
-wipe!(xs...) = foreach(wipe!, xs)
+
+# Views, Memory, reshaped arrays: contiguous memory is cleared like an Array; any other
+# array of numbers is zeroed element by element. The barrier's memory clobber keeps the stores.
+function wipe!(x::AbstractArray{T}) where {T}
+    isbitstype(T) || throw(ArgumentError("wipe! needs plain-data elements, got $T"))
+    if x isa StridedArray && strides(x) == Base.size_to_strides(1, size(x)...)
+        GC.@preserve x begin
+            p = Ptr{Cvoid}(pointer(x))
+            ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), p, 0, length(x) * sizeof(T))
+            barrier(p)
+        end
+    elseif T <: Number
+        fill!(x, zero(T))
+        barrier(C_NULL)
+    else
+        throw(ArgumentError("wipe! cannot zero a non-contiguous $(typeof(x))"))
+    end
+    x
+end
+wipe!(x) = throw(ArgumentError("wipe! zeroes arrays of plain data, got $(typeof(x))"))
+wipe!() = nothing
+wipe!(a, b, xs...) = (wipe!(a); wipe!(b); foreach(wipe!, xs); nothing)
 
 end # module Wipe

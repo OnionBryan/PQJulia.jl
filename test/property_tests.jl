@@ -207,7 +207,7 @@ println("=" ^ 70)
         msg = Vector{UInt8}("test")
         long_ctx = rand(UInt8, 256)  # >255 bytes
 
-        @test_throws ErrorException MLDSA.Category3.dilithium_sign(msg, sk; context=long_ctx)
+        @test_throws ArgumentError MLDSA.Category3.dilithium_sign(msg, sk; context=long_ctx)
         sig = MLDSA.Category3.dilithium_sign(msg, sk)
         @test !MLDSA.Category3.dilithium_verify(msg, sig, pk; context=long_ctx)
 
@@ -332,9 +332,9 @@ println("=" ^ 70)
     @testset "ML-DSA prehash invalid hash algorithm" begin
         pk, sk = MLDSA.Category3.dilithium_keygen()
         msg = Vector{UInt8}("test")
-        @test_throws ErrorException MLDSA.Category3.dilithium_sign_prehash(msg, sk, "SHA2-999")
+        @test_throws ArgumentError MLDSA.Category3.dilithium_sign_prehash(msg, sk, "SHA2-999")
         sig = MLDSA.Category3.dilithium_sign_prehash(msg, sk, "SHA2-256")
-        @test_throws ErrorException MLDSA.Category3.dilithium_verify_prehash(msg, sig, pk, "SHA2-999")
+        @test_throws ArgumentError MLDSA.Category3.dilithium_verify_prehash(msg, sig, pk, "SHA2-999")
     end
 
     # ─── Wycheproof #1: Wrong-length sig across all levels ───────────

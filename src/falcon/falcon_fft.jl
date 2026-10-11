@@ -41,8 +41,11 @@ end
 
 # ── Complex FFT over R[x]/(xⁿ+1) ────────────────────────────────────────────
 # ζ_k, the n roots of xⁿ+1; (2k+1)/n is exact for n a power of 2, so cispi rounds each root once.
-const ROOTS = Dict{Int,Vector{ComplexF64}}()
-roots(n) = get!(() -> ComplexF64[cispi((2k + 1) / n) for k in 0:n-1], ROOTS, n)
+# A table built at load for n = 1, 2, …, 1024 rather than a Dict filled on demand: concurrent
+# calls from several threads only read it. Other n are computed on each call.
+rootsof(n) = ComplexF64[cispi((2k + 1) / n) for k in 0:n-1]
+const ROOT_TABLE = [rootsof(1 << k) for k in 0:10]
+roots(n) = ispow2(n) && n <= 1024 ? ROOT_TABLE[trailing_zeros(n) + 1] : rootsof(n)
 
 # fft(f) = merge_fft(fft(f_even), fft(f_odd)): O(n log n), each root used once per level.
 function fft(f::AbstractVector)

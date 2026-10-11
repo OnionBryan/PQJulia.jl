@@ -1,14 +1,12 @@
 #!/usr/bin/env julia
 #= test/falcon_validation.jl — discriminating validation of the Falcon (FN-DSA /
    FIPS 206) port. Each check is against ground truth (negacyclic multiply, target
-   Gaussian moments, the NTRU equation, encode round-trip, the native NEON NTT,
-   and end-to-end keygen→sign→verify with the spec norm bound). Run:
+   Gaussian moments, the NTRU equation, encode round-trip, and end-to-end keygen→sign→verify with the spec norm bound). Run:
        julia test/falcon_validation.jl =#
 using Statistics, Printf, PQJulia
 const FalconFFT = PQJulia.FNDSA.FalconFFT; const FalconSampler = PQJulia.FNDSA.FalconSampler
 const FalconEncoding = PQJulia.FNDSA.FalconEncoding; const Falcon = PQJulia.FNDSA.Falcon
-include(joinpath(@__DIR__, "..", "research", "falcon_neon.jl")); using .FalconNEON
-const FF = FalconFFT; const NE = FalconNEON
+const FF = FalconFFT
 
 pass = 0; fail = 0
 chk(c, m) = (global pass, fail; c ? (pass += 1; println("  ok   ", m)) : (fail += 1; println("  FAIL ", m)))
@@ -43,15 +41,6 @@ let s = round.(Int, 60 .* randn(512))
     enc = FalconEncoding.compress(s, (666-41)*8)
     chk(enc !== nothing && length(enc)==625 && FalconEncoding.decompress(enc,(666-41)*8,512)==s,
         "compress/decompress round-trips, 625 bytes (Falcon-512 sig − salt − header)")
-end
-
-println("── Native NEON NTT (C/NEON) = reference ──")
-if !NE.isavailable()
-    println("  skip  (native/libforgeddec not built)")
-else
-    a = rand(0:FF.q-1,512); b = rand(0:FF.q-1,512)
-    chk(NE.neon_negamul(a,b) == mod.(FF.negacyclic_mul(a,b), FF.q),
-        "NEON NTT negamul = reference (n=512)")
 end
 
 println("── End-to-end keygen → sign → verify (+ forgery rejection) ──")

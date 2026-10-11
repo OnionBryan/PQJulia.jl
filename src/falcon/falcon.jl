@@ -500,6 +500,10 @@ struct ExpandedKey{S<:NamedTuple}
     sk::S
     gs::FP.Setup                                   # integer-emulated signer (falcon_fpr.jl)
 end
+# Secret material: printing shows the degree only.
+Base.show(io::IO, ek::ExpandedKey) = print(io, "Falcon.ExpandedKey(n = ", ek.sk.n, ", <secret>)")
+Base.show(io::IO, ::FFLeaf) = print(io, "Falcon.FFLeaf(<secret>)")
+Base.show(io::IO, T::FFNode) = print(io, "Falcon.FFNode(n = ", length(T.l10), ", <secret>)")
 expand_sk(sk::NamedTuple) = ExpandedKey(sk, FP.setup(sk, params(sk.n).σ, params(sk.n).σmin))
 function expand_sk(skb::AbstractVector{UInt8})
     sk = decode_sk(skb); sk === nothing && throw(ArgumentError("invalid Falcon secret key"))

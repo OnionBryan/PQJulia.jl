@@ -388,6 +388,10 @@ function setup(sk, σ::Float64, σmin::Float64; leaf=leafsigma)
     Setup(b00, b01, b10, b11, T)
 end
 wipe!(gs::Setup) = (wipe!(gs.b00, gs.b01, gs.b10, gs.b11); wipe!(gs.T); gs)
+# Secret material: printing shows the degree only.
+Base.show(io::IO, gs::Setup) = print(io, "FalconFpr.Setup(n = ", length(gs.b00), ", <secret>)")
+Base.show(io::IO, ::Leaf) = print(io, "FalconFpr.Leaf(<secret>)")
+Base.show(io::IO, T::Node) = print(io, "FalconFpr.Node(n = ", length(T.l10), ", <secret>)")
 
 # Before each signature: the leaves of an expanded key may have changed since setup (memory
 # corruption, a fault, or a wiped key, whose zero leaves would make signing loop forever).

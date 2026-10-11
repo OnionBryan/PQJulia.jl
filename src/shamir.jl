@@ -95,9 +95,15 @@ Reconstruct raw bytes from Shamir shares. `nbytes` is the expected output
 length (e.g., 32 for a 256-bit key).
 """
 function shamir_reconstruct_bytes(shares::Vector{Tuple{Int, T}}, k::Int, nbytes::Int, p::Integer=PRIME_P) where T <: Integer
+    nbytes >= 1 || throw(ArgumentError("nbytes must be >= 1, got $nbytes"))
     secret_int = shamir_reconstruct(shares, k, p)
-    hex = string(secret_int, base=16)
-    # Pad to expected length
-    hex = lpad(hex, 2 * nbytes, '0')
-    return hex2bytes(hex)
+    # A value of more than nbytes bytes means inconsistent shares or a wrong nbytes.
+    secret_int < big(2)^(8nbytes) ||
+        throw(ArgumentError("reconstructed secret does not fit in $nbytes bytes (wrong shares or nbytes)"))
+    out = zeros(UInt8, nbytes)                     # big-endian, as shamir_share_bytes reads it
+    for i in nbytes:-1:1
+        out[i] = (secret_int & 0xff) % UInt8
+        secret_int >>= 8
+    end
+    return out
 end
