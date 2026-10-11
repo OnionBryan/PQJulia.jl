@@ -165,6 +165,7 @@ include("falcon_mrm.jl")
 include("falcon_fxp.jl")
 include("falcon_fpr.jl")
 include("falcon_hardening.jl")
+include("regressions_falcon_mrm.jl")
 include("vectors_extra.jl")
 
 # ==================== X25519 and X-Wing ====================
