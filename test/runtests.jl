@@ -225,10 +225,12 @@ end
             @test length(r) == 32 && r == s
         end
         @test shamir_reconstruct_bytes(shamir_share_bytes(zeros(UInt8, 32), 2, 3), 2, 32) == zeros(UInt8, 32)
-        # A secret longer than nbytes, or inconsistent shares, is an error instead of a wrong-length result.
+        # A secret longer than nbytes is an error instead of a wrong-length result. Shamir sharing has no
+        # integrity: a share altered by δ shifts the secret by λ·δ mod p (λ = 1 for share 3 of 1:3), so
+        # only alterations that leave the nbytes range are detected.
         @test_throws ArgumentError shamir_reconstruct_bytes(shares, 3, 16)
         @test_throws ArgumentError shamir_reconstruct_bytes(shares, 3, 0)
-        bad = [shares[1], shares[2], (shares[3][1], shares[3][2] + 1)]
+        bad = [shares[1], shares[2], (shares[3][1], mod(shares[3][2] + big(2)^300, PQJulia.PRIME_P))]
         @test_throws ArgumentError shamir_reconstruct_bytes(bad, 3, 32)
     end
     @testset "Duplicate x-coordinates rejected" begin
