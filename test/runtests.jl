@@ -236,6 +236,42 @@ end
     @testset "Duplicate x-coordinates rejected" begin
         shares = shamir_share(big(123), 3, 5)
         @test_throws ArgumentError shamir_reconstruct([shares[1], shares[2], shares[1]], 3)
+        # x and x + p are the same field point
+        @test_throws ArgumentError shamir_reconstruct([(1, big(3)), (14, big(3))], 2, 13)
+    end
+    @testset "Invalid thresholds, moduli and secrets rejected" begin
+        shares = shamir_share(big(12345), 2, 3)
+        for k in (0, -1)
+            @test_throws ArgumentError shamir_reconstruct(shares, k)
+            @test_throws ArgumentError shamir_reconstruct_bytes(shamir_share_bytes(rand(UInt8, 32), 2, 3), k, 32)
+        end
+        @test_throws ArgumentError shamir_share_bytes(UInt8[], 3, 5)
+        @test_throws ArgumentError shamir_share(7, 3, 13, 13)          # x = 13 ≡ 0 would be the secret
+        @test_throws ArgumentError shamir_share(7, 3, 14, 13)
+        for p in (12, 1, 0, -7, big(2)^521 - 3)                        # not prime
+            @test_throws ArgumentError shamir_share(0, 1, 1, p)
+        end
+        @test_throws ArgumentError shamir_reconstruct([(1, big(7)), (2, big(9))], 2, 12)
+        @test_throws ArgumentError shamir_share_bytes(fill(0xff, 66), 2, 3)   # >= p
+        sh = shamir_share(7, 3, 12, 13)                                # a small prime field works
+        @test shamir_reconstruct(sh[[2, 5, 12]], 3, 13) == 7
+    end
+    @testset "x-coordinates far apart (no Int overflow)" begin
+        P = PQJulia.PRIME_P; s = big(424242); a = big(987654321)
+        f(x) = mod(s + a * big(x), P)
+        @test shamir_reconstruct([(x, f(x)) for x in [typemax(Int), -2]], 2) == s
+        @test shamir_reconstruct([(x, f(x)) for x in [typemin(Int), 1]], 2) == s
+        @test shamir_reconstruct([(x, f(x)) for x in [5, -7]], 2) == s
+    end
+    @testset "Byte round trip, every length" begin
+        for len in 1:65, (k, n) in ((1, 1), (2, 3), (3, 5))
+            sec = rand(UInt8, len); sec[1] = rand((0x00, sec[1]))
+            sh = shamir_share_bytes(sec, k, n)
+            @test shamir_reconstruct_bytes(sh[end-k+1:end], k, len) == sec
+            @test shamir_reconstruct_bytes(sh, k, len + 3) == vcat(zeros(UInt8, 3), sec)
+        end
+        # The secret goes into one BigInt without a hex String copy.
+        @test !occursin("bytes2hex", read(joinpath(pkgdir(PQJulia), "src", "shamir.jl"), String))
     end
 end
 

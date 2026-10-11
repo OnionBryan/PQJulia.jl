@@ -18,19 +18,30 @@ function wipe!(x::Array{T}) where {T}
 end
 wipe!(x::Vector{<:Array}) = (foreach(wipe!, x); x)
 
-# Views, Memory, reshaped arrays: contiguous memory is cleared like an Array; any other
-# array of numbers is zeroed element by element. The barrier's memory clobber keeps the stores.
+# The mutable storage under a wrapper (view, reshape, reinterpret, transpose, PermutedDimsArray):
+# follow `parent` to the end. Only Array, Memory and BitArray storage is written to; anything
+# else (CodeUnits of an immutable String, ranges, unknown array types) is refused.
+storage(x::AbstractArray) = (p = parent(x); p === x ? x : storage(p))
+writable(::Union{Array, Memory, BitArray}) = true
+writable(_) = false
+base_pointer(s::Union{Array, Memory}) = Ptr{Cvoid}(pointer(s))
+base_pointer(s::BitArray) = Ptr{Cvoid}(pointer(s.chunks))
+
+# Contiguous memory is cleared with memset over its element stride (Base.elsize, which exceeds
+# sizeof(T) for padded types); any other array of numbers is zeroed element by element. In both
+# cases the barrier receives the storage pointer, so the stores cannot be dropped.
 function wipe!(x::AbstractArray{T}) where {T}
     isbitstype(T) || throw(ArgumentError("wipe! needs plain-data elements, got $T"))
+    s = storage(x)
+    writable(s) || throw(ArgumentError("wipe! cannot write to the storage of a $(typeof(x))"))
     if x isa StridedArray && strides(x) == Base.size_to_strides(1, size(x)...)
-        GC.@preserve x begin
-            p = Ptr{Cvoid}(pointer(x))
-            ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), p, 0, length(x) * sizeof(T))
-            barrier(p)
+        GC.@preserve x s begin
+            ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), pointer(x), 0, length(x) * Base.elsize(x))
+            barrier(base_pointer(s))
         end
     elseif T <: Number
         fill!(x, zero(T))
-        barrier(C_NULL)
+        GC.@preserve s barrier(base_pointer(s))
     else
         throw(ArgumentError("wipe! cannot zero a non-contiguous $(typeof(x))"))
     end

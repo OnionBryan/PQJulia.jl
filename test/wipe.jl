@@ -34,6 +34,47 @@ end
     @test W.wipe!() === nothing
 end
 
+# A strided view of a local buffer: the barrier must receive the storage pointer, or LLVM drops
+# the element-wise zeroing as dead stores.
+function wipe_strided_local(x::UInt64)
+    a = Vector{UInt64}(undef, 16)
+    for i in 1:16; a[i] = x * i; end
+    s = a[3] ⊻ a[7]; W.wipe!(view(a, 1:2:16)); s
+end
+function wipe_transposed_local(x::UInt64)
+    a = Matrix{UInt64}(undef, 4, 4)
+    for i in 1:16; a[i] = x * i; end
+    s = a[3] ⊻ a[7]; W.wipe!(transpose(a)); s
+end
+primitive type Wipe24 24 end
+
+@testset "wipe! storage: barrier, padding, read-only arrays" begin
+    for f in (wipe_strided_local, wipe_transposed_local)
+        ir = split(sprint(io -> code_llvm(io, f, (UInt64,); debuginfo=:none)), '\n')
+        asm = filter(l -> occursin("asm sideeffect", l), ir)
+        @test !isempty(asm) && !any(l -> occursin("ptr null", l), asm)
+        @test any(l -> occursin(r"store .*(zeroinitializer| 0,)", l) || occursin("scatter", l), ir)
+    end
+    # Element stride above sizeof(T): every element is cleared, as in the Array method.
+    v = [Core.Intrinsics.trunc_int(Wipe24, 0x00abcdef) for _ in 1:8]
+    @test Base.elsize(v) > sizeof(Wipe24)
+    z(p) = Core.Intrinsics.zext_int(UInt32, p) == 0
+    w = copy(v); W.wipe!(view(w, 1:8)); @test all(z, w)
+    m = Memory{Wipe24}(undef, 8); m .= v; W.wipe!(m); @test all(z, m)
+    # BitArray, transpose, PermutedDimsArray, reinterpret: written through their parent storage.
+    b = trues(70); W.wipe!(view(b, 1:2:70)); @test !any(b[1:2:70]) && all(b[2:2:70])
+    t = rand(Int, 3, 4) .| 1; W.wipe!(transpose(t)); @test all(iszero, t)
+    q = rand(Int16, 2, 3, 4) .| 1; W.wipe!(PermutedDimsArray(q, (3, 1, 2))); @test all(iszero, q)
+    r = collect(UInt8, 1:16); W.wipe!(reinterpret(UInt32, r)); @test all(iszero, r)
+    # Read-only storage is refused: a String's code units (immutable, possibly shared) and ranges.
+    greeting() = "hello, world"
+    s = greeting()
+    for bad in (codeunits(s), view(codeunits(s), 1:3), 1:10, 1:2:9, Base.OneTo(4), 0x01:0x05, reshape(1:6, 2, 3))
+        @test_throws ArgumentError W.wipe!(bad)
+    end
+    @test greeting() == "hello, world"
+end
+
 @testset "API leaves caller inputs intact" begin
     unchanged(f, xs...) = (cs = deepcopy(xs); f(xs...); all(map(==, cs, xs)))
     for C in (MLKEM.Category1, MLKEM.Category3, MLKEM.Category5)
