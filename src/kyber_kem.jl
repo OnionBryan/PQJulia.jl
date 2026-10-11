@@ -1,27 +1,31 @@
 # ── rkprf: SHAKE-256(key || input) ───────────────────────────────────────────
 # Mirrors symmetric-shake.c:kyber_shake256_rkprf
 
-function kyber_rkprf(key::Vector{UInt8}, input::Vector{UInt8})
-    inp = vcat(key, input)
-    out = Keccak.shake256(inp, UInt64(KYBER_SSBYTES))
-    wipe!(inp)
-    return out
+function kyber_rkprf(key::AbstractVector{UInt8}, input::Vector{UInt8})
+    inp = catbytes(key, input)              # z ‖ c: z is secret
+    try
+        return Keccak.shake256(inp, UInt64(KYBER_SSBYTES))
+    finally
+        wipe!(inp)
+    end
 end
 
 # ── Polyvec Serialization ────────────────────────────────────────────────────
 # Mirrors polyvec.c: polyvec_tobytes / polyvec_frombytes
 
 function kyber_polyvec_tobytes!(r::AbstractVector{UInt8}, a::Vector{Vector{Int16}}, k::Int)
+    o = firstindex(r) - 1
     for i in 1:k
-        offset = (i - 1) * KYBER_POLYBYTES
+        offset = o + (i - 1) * KYBER_POLYBYTES
         kyber_poly_tobytes!(@view(r[offset+1:offset+KYBER_POLYBYTES]), a[i])
     end
     return r
 end
 
 function kyber_polyvec_frombytes!(r::Vector{Vector{Int16}}, a::AbstractVector{UInt8}, k::Int)
+    o = firstindex(a) - 1
     for i in 1:k
-        offset = (i - 1) * KYBER_POLYBYTES
+        offset = o + (i - 1) * KYBER_POLYBYTES
         kyber_poly_frombytes!(r[i], @view(a[offset+1:offset+KYBER_POLYBYTES]))
     end
     return r
@@ -48,17 +52,23 @@ end
 
 # ── Polyvec Basemul Accumulate Montgomery ────────────────────────────────────
 # Mirrors polyvec.c:polyvec_basemul_acc_montgomery
+#
+# `tmp` holds each product a[i]∘b[i] for i ≥ 2. On the secret paths one factor is ŝ or r̂ and the
+# other public, so a product is secret-equivalent (Â[i][k]∘ŝ_k, t̂_k∘r̂_k, ŝ_k∘NTT(u)_k each give
+# the secret polynomial back). The scratch is zeroed before returning; callers on secret paths
+# pass their own and also wipe it in a `finally`, which covers an exit by exception.
 
 function kyber_polyvec_basemul_acc!(r::Vector{Int16},
                                     a::Vector{Vector{Int16}},
                                     b::Vector{Vector{Int16}},
-                                    k::Int)
+                                    k::Int,
+                                    tmp::Vector{Int16} = zeros(Int16, KYBER_N))
     kyber_poly_basemul_montgomery!(r, a[1], b[1])
-    tmp = zeros(Int16, KYBER_N)
     for i in 2:k
         kyber_poly_basemul_montgomery!(tmp, a[i], b[i])
         kyber_poly_add!(r, r, tmp)
     end
+    wipe!(tmp)
     kyber_poly_reduce!(r)
     return r
 end
@@ -235,60 +245,68 @@ end
 # ══════════════════════════════════════════════════════════════════════════════
 # IND-CPA KeyGen (indcpa.c:205 -- indcpa_keypair_derand)
 # ══════════════════════════════════════════════════════════════════════════════
+#
+# Secret buffers are allocated before the `try` and wiped in its `finally`, so they are zeroed
+# on every exit, an exception included. The same pattern runs through the functions below.
 
 function kyber_indcpa_keypair_derand(coins::Vector{UInt8})
     k = KYBER_K
+    buf   = UInt8[]                              # G(d ‖ k) = ρ ‖ σ
+    sigma = UInt8[]
+    skpv  = [zeros(Int16, KYBER_N) for _ in 1:k] # s
+    e     = [zeros(Int16, KYBER_N) for _ in 1:k]
+    pkpv  = [zeros(Int16, KYBER_N) for _ in 1:k] # Â∘ŝ until e is added
+    tmp   = zeros(Int16, KYBER_N)                # basemul scratch: Â[i][j]∘ŝ_j
+    buf_in = catbytes(view(coins, 1:KYBER_SYMBYTES), UInt8(k))   # d ‖ k
+    try
+        buf = kyber_hash_g(buf_in)  # 64 bytes
+        rho = buf[1:KYBER_SYMBYTES]
+        sigma = buf[KYBER_SYMBYTES+1:2*KYBER_SYMBYTES]
 
-    # buf = coins || KYBER_K byte, then hash_g on 33 bytes
-    buf_in = vcat(view(coins, 1:KYBER_SYMBYTES), UInt8[UInt8(k)])
-    buf = kyber_hash_g(buf_in)  # 64 bytes
-    rho = buf[1:KYBER_SYMBYTES]
-    sigma = buf[KYBER_SYMBYTES+1:2*KYBER_SYMBYTES]
+        # gen_a: A matrix (not transposed)
+        a = kyber_gen_matrix(rho, false, k)
 
-    # gen_a: A matrix (not transposed)
-    a = kyber_gen_matrix(rho, false, k)
+        # Sample secret and error vectors
+        nonce = UInt8(0)
+        for i in 1:k
+            kyber_poly_getnoise_eta1!(skpv[i], sigma, nonce, KYBER_ETA1)
+            nonce += UInt8(1)
+        end
+        for i in 1:k
+            kyber_poly_getnoise_eta1!(e[i], sigma, nonce, KYBER_ETA1)
+            nonce += UInt8(1)
+        end
 
-    # Sample secret and error vectors
-    skpv = [zeros(Int16, KYBER_N) for _ in 1:k]
-    e    = [zeros(Int16, KYBER_N) for _ in 1:k]
-    nonce = UInt8(0)
-    for i in 1:k
-        kyber_poly_getnoise_eta1!(skpv[i], sigma, nonce, KYBER_ETA1)
-        nonce += UInt8(1)
+        # NTT(s), NTT(e) -- poly_ntt does ntt + reduce
+        kyber_polyvec_ntt!(skpv, k)
+        kyber_polyvec_ntt!(e, k)
+
+        # t = A * s (in NTT domain), with tomont after basemul
+        for i in 1:k
+            kyber_polyvec_basemul_acc!(pkpv[i], a[i], skpv, k, tmp)
+            kyber_poly_tomont!(pkpv[i])
+        end
+
+        # t = t + e
+        kyber_polyvec_add!(pkpv, pkpv, e, k)
+        kyber_polyvec_reduce!(pkpv, k)
+
+        # Pack; nothing can throw once the packed secret key exists
+        pk_bytes = kyber_pack_pk(pkpv, rho, k)
+        return pk_bytes, kyber_pack_sk(skpv, k)
+    finally
+        wipe!(buf_in, buf, sigma, tmp)
+        wipe!(skpv, e, pkpv)
     end
-    for i in 1:k
-        kyber_poly_getnoise_eta1!(e[i], sigma, nonce, KYBER_ETA1)
-        nonce += UInt8(1)
-    end
-
-    # NTT(s), NTT(e) -- poly_ntt does ntt + reduce
-    kyber_polyvec_ntt!(skpv, k)
-    kyber_polyvec_ntt!(e, k)
-
-    # t = A * s (in NTT domain), with tomont after basemul
-    pkpv = [zeros(Int16, KYBER_N) for _ in 1:k]
-    for i in 1:k
-        kyber_polyvec_basemul_acc!(pkpv[i], a[i], skpv, k)
-        kyber_poly_tomont!(pkpv[i])
-    end
-
-    # t = t + e
-    kyber_polyvec_add!(pkpv, pkpv, e, k)
-    kyber_polyvec_reduce!(pkpv, k)
-
-    # Pack
-    sk_bytes = kyber_pack_sk(skpv, k)
-    pk_bytes = kyber_pack_pk(pkpv, rho, k)
-    wipe!(buf_in, buf, sigma, skpv, e)
-
-    return pk_bytes, sk_bytes
 end
 
 function kyber_indcpa_keypair()
     coins = rand(Random.RandomDevice(), UInt8, KYBER_SYMBYTES)
-    kp = kyber_indcpa_keypair_derand(coins)
-    wipe!(coins)
-    return kp
+    try
+        return kyber_indcpa_keypair_derand(coins)
+    finally
+        wipe!(coins)
+    end
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -298,109 +316,118 @@ end
 function kyber_indcpa_enc(m::Vector{UInt8}, pk::Vector{UInt8}, coins::Vector{UInt8})
     k = KYBER_K
 
-    # Unpack public key
+    # Unpack public key; gen_at: A^T (transposed). All public.
     t_hat, rho = kyber_unpack_pk(pk, k)
-
-    # Message to polynomial
-    msg_poly = zeros(Int16, KYBER_N)
-    kyber_poly_frommsg!(msg_poly, m)
-
-    # gen_at: A^T (transposed)
     at = kyber_gen_matrix(rho, true, k)
 
-    # Sample r (sp), e1 (ep), e2 (epp)
-    sp  = [zeros(Int16, KYBER_N) for _ in 1:k]
-    ep  = [zeros(Int16, KYBER_N) for _ in 1:k]
-    epp = zeros(Int16, KYBER_N)
-    nonce = UInt8(0)
-    for i in 1:k
-        kyber_poly_getnoise_eta1!(sp[i], coins, nonce, KYBER_ETA1)
-        nonce += UInt8(1)
+    msg_poly = zeros(Int16, KYBER_N)
+    sp  = [zeros(Int16, KYBER_N) for _ in 1:k]   # r
+    ep  = [zeros(Int16, KYBER_N) for _ in 1:k]   # e1
+    epp = zeros(Int16, KYBER_N)                  # e2
+    b   = [zeros(Int16, KYBER_N) for _ in 1:k]   # Âᵀ∘r̂ until e1 is added
+    v   = zeros(Int16, KYBER_N)                  # t̂ᵀ∘r̂ until e2 and the message are added
+    tmp = zeros(Int16, KYBER_N)                  # basemul scratch: Âᵀ[i][j]∘r̂_j, t̂_j∘r̂_j
+    try
+        # Message to polynomial
+        kyber_poly_frommsg!(msg_poly, m)
+
+        # Sample r (sp), e1 (ep), e2 (epp)
+        nonce = UInt8(0)
+        for i in 1:k
+            kyber_poly_getnoise_eta1!(sp[i], coins, nonce, KYBER_ETA1)
+            nonce += UInt8(1)
+        end
+        for i in 1:k
+            kyber_poly_getnoise_eta2!(ep[i], coins, nonce)
+            nonce += UInt8(1)
+        end
+        kyber_poly_getnoise_eta2!(epp, coins, nonce)
+
+        # NTT(r)
+        kyber_polyvec_ntt!(sp, k)
+
+        # b = A^T * r  (in NTT domain)
+        for i in 1:k
+            kyber_polyvec_basemul_acc!(b[i], at[i], sp, k, tmp)
+        end
+
+        # v = t^T * r  (inner product in NTT domain)
+        kyber_polyvec_basemul_acc!(v, t_hat, sp, k, tmp)
+
+        # INTT
+        kyber_polyvec_invntt_tomont!(b, k)
+        kyber_invntt!(v)
+
+        # b = b + e1
+        kyber_polyvec_add!(b, b, ep, k)
+
+        # v = v + e2 + msg
+        kyber_poly_add!(v, v, epp)
+        kyber_poly_add!(v, v, msg_poly)
+
+        # Reduce
+        kyber_polyvec_reduce!(b, k)
+        kyber_poly_reduce!(v)
+
+        # Pack ciphertext
+        return kyber_pack_ciphertext(b, v, k)
+    finally
+        wipe!(msg_poly, epp, v, tmp)
+        wipe!(sp, ep, b)
     end
-    for i in 1:k
-        kyber_poly_getnoise_eta2!(ep[i], coins, nonce)
-        nonce += UInt8(1)
-    end
-    kyber_poly_getnoise_eta2!(epp, coins, nonce)
-
-    # NTT(r)
-    kyber_polyvec_ntt!(sp, k)
-
-    # b = A^T * r  (in NTT domain)
-    b = [zeros(Int16, KYBER_N) for _ in 1:k]
-    for i in 1:k
-        kyber_polyvec_basemul_acc!(b[i], at[i], sp, k)
-    end
-
-    # v = t^T * r  (inner product in NTT domain)
-    v = zeros(Int16, KYBER_N)
-    kyber_polyvec_basemul_acc!(v, t_hat, sp, k)
-
-    # INTT
-    kyber_polyvec_invntt_tomont!(b, k)
-    kyber_invntt!(v)
-
-    # b = b + e1
-    kyber_polyvec_add!(b, b, ep, k)
-
-    # v = v + e2 + msg
-    kyber_poly_add!(v, v, epp)
-    kyber_poly_add!(v, v, msg_poly)
-
-    # Reduce
-    kyber_polyvec_reduce!(b, k)
-    kyber_poly_reduce!(v)
-
-    # Pack ciphertext
-    ct = kyber_pack_ciphertext(b, v, k)
-    wipe!(msg_poly, sp, ep, epp, b, v)
-    return ct
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
 # IND-CPA Decrypt (indcpa.c:314 -- indcpa_dec)
 # ══════════════════════════════════════════════════════════════════════════════
 
-function kyber_indcpa_dec(ct::Vector{UInt8}, sk::Vector{UInt8})
+# `sk` is the encoded ŝ: a Vector, or a view into the KEM decapsulation key (no copy to wipe).
+function kyber_indcpa_dec(ct::Vector{UInt8}, sk::AbstractVector{UInt8})
     k = KYBER_K
 
-    # Unpack ciphertext
+    # Unpack ciphertext (public) and NTT(u)
     b, v = kyber_unpack_ciphertext(ct, k)
-
-    # Unpack secret key
-    s_hat = kyber_unpack_sk(sk, k)
-
-    # NTT(u)
     kyber_polyvec_ntt!(b, k)
 
-    # mp = s^T * u (in NTT domain)
-    mp = zeros(Int16, KYBER_N)
-    kyber_polyvec_basemul_acc!(mp, s_hat, b, k)
+    s_hat = [zeros(Int16, KYBER_N) for _ in 1:k]
+    mp    = zeros(Int16, KYBER_N)                 # ŝᵀ∘û, then v − ŝᵀu
+    tmp   = zeros(Int16, KYBER_N)                 # basemul scratch: ŝ_j∘û_j
+    try
+        # Unpack secret key
+        kyber_polyvec_frombytes!(s_hat, sk, k)
 
-    # INTT
-    kyber_invntt!(mp)
+        # mp = s^T * u (in NTT domain)
+        kyber_polyvec_basemul_acc!(mp, s_hat, b, k, tmp)
 
-    # mp = v - mp
-    kyber_poly_sub!(mp, v, mp)
-    kyber_poly_reduce!(mp)
+        # INTT
+        kyber_invntt!(mp)
 
-    # Convert back to message
-    msg = Vector{UInt8}(undef, KYBER_INDCPA_MSGBYTES)
-    kyber_poly_tomsg!(msg, mp)
-    wipe!(s_hat, mp)
-    return msg
+        # mp = v - mp
+        kyber_poly_sub!(mp, v, mp)
+        kyber_poly_reduce!(mp)
+
+        # Convert back to message
+        msg = Vector{UInt8}(undef, KYBER_INDCPA_MSGBYTES)
+        return kyber_poly_tomsg!(msg, mp)
+    finally
+        wipe!(mp, tmp)
+        wipe!(s_hat)
+    end
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
 # FIPS 203 input checks (§7.2 Encaps, §7.3 Decaps)
 # ══════════════════════════════════════════════════════════════════════════════
+# Both accept any AbstractVector{UInt8} and index from firstindex, so a vector with other axes
+# gets the same verdict as a Vector holding the same bytes.
 
 """Encapsulation key check: correct length and every 12-bit coefficient < q (modulus check)."""
 function kyber_ek_check(ek::AbstractVector{UInt8})
     length(ek) == KYBER_PUBLICKEYBYTES || return false
+    o = firstindex(ek) - 1
     for i in 1:3:KYBER_POLYVECBYTES
-        a0 = UInt16(ek[i]) | (UInt16(ek[i+1]) & 0x0f) << 8
-        a1 = UInt16(ek[i+1]) >> 4 | UInt16(ek[i+2]) << 4
+        a0 = UInt16(ek[o+i]) | (UInt16(ek[o+i+1]) & 0x0f) << 8
+        a1 = UInt16(ek[o+i+1]) >> 4 | UInt16(ek[o+i+2]) << 4
         (a0 >= KYBER_Q || a1 >= KYBER_Q) && return false
     end
     return true
@@ -409,9 +436,14 @@ end
 """Decapsulation key check: correct length and the embedded H(ek) matches ek (hash check)."""
 function kyber_dk_check(dk::AbstractVector{UInt8})
     length(dk) == KYBER_SECRETKEYBYTES || return false
-    ek = dk[KYBER_INDCPA_SECRETKEYBYTES+1:KYBER_INDCPA_SECRETKEYBYTES+KYBER_PUBLICKEYBYTES]
-    h = dk[KYBER_SECRETKEYBYTES-2*KYBER_SYMBYTES+1:KYBER_SECRETKEYBYTES-KYBER_SYMBYTES]
-    return kyber_hash_h(ek) == h
+    o = firstindex(dk) - 1
+    h = kyber_hash_h(view(dk, o+KYBER_INDCPA_SECRETKEYBYTES+1:o+KYBER_INDCPA_SECRETKEYBYTES+KYBER_PUBLICKEYBYTES))
+    hoff = o + KYBER_SECRETKEYBYTES - 2 * KYBER_SYMBYTES
+    d = 0x00
+    for i in 1:KYBER_SYMBYTES
+        d |= h[i] ⊻ dk[hoff+i]
+    end
+    return d == 0x00
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -424,19 +456,22 @@ function kyber_kem_keypair_derand(coins::Vector{UInt8})
     # coins is 2*KYBER_SYMBYTES = 64 bytes
     # First 32 bytes -> indcpa keygen seed, last 32 bytes -> z
     pk, sk_cpa = kyber_indcpa_keypair_derand(coins)
-
-    # Build KEM secret key: sk_cpa || pk || H(pk) || z
-    h_pk = kyber_hash_h(pk)
-    sk = vcat(sk_cpa, pk, h_pk, view(coins, KYBER_SYMBYTES+1:2*KYBER_SYMBYTES))
-    wipe!(sk_cpa)
-    return pk, sk
+    try
+        # Build KEM secret key: sk_cpa || pk || H(pk) || z
+        h_pk = kyber_hash_h(pk)
+        return pk, catbytes(sk_cpa, pk, h_pk, view(coins, KYBER_SYMBYTES+1:2*KYBER_SYMBYTES))
+    finally
+        wipe!(sk_cpa)
+    end
 end
 
 function kyber_kem_keypair()
     coins = rand(Random.RandomDevice(), UInt8, 2 * KYBER_SYMBYTES)
-    kp = kyber_kem_keypair_derand(coins)
-    wipe!(coins)
-    return kp
+    try
+        return kyber_kem_keypair_derand(coins)
+    finally
+        wipe!(coins)
+    end
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -446,32 +481,36 @@ end
 function kyber_kem_enc_derand(pk::Vector{UInt8}, coins::Vector{UInt8})
     kyber_ek_check(pk) || throw(ArgumentError("$IDENTIFIER encapsulation key failed the FIPS 203 input check"))
     length(coins) == KYBER_SYMBYTES || throw(ArgumentError("coins must be $KYBER_SYMBYTES bytes"))
-    # buf = coins (the message m)
-    buf = copy(coins)
+    # The message m is `coins`, read in place (the caller owns and wipes it).
+    buf_full = UInt8[]
+    kr = UInt8[]
+    r  = UInt8[]
+    try
+        # Multitarget countermeasure: buf_full = m || H(pk)
+        h_pk = kyber_hash_h(pk)
+        buf_full = catbytes(coins, h_pk)
 
-    # Multitarget countermeasure: buf = m || H(pk)
-    h_pk = kyber_hash_h(pk)
-    buf_full = vcat(buf, h_pk)
+        # kr = G(m || H(pk))  -> 64 bytes: first 32 = shared secret K, last 32 = encryption coins
+        kr = kyber_hash_g(buf_full)
 
-    # kr = G(m || H(pk))  -> 64 bytes: first 32 = shared secret K, last 32 = encryption coins
-    kr = kyber_hash_g(buf_full)
+        # Encrypt: ct = indcpa_enc(m, pk, kr[33:64])
+        r = kr[KYBER_SYMBYTES+1:2*KYBER_SYMBYTES]
+        ct = kyber_indcpa_enc(coins, pk, r)
 
-    # Encrypt: ct = indcpa_enc(m, pk, kr[33:64])
-    r = kr[KYBER_SYMBYTES+1:2*KYBER_SYMBYTES]
-    ct = kyber_indcpa_enc(buf, pk, r)
-
-    # Shared secret = first 32 bytes of kr
-    ss = kr[1:KYBER_SYMBYTES]
-    wipe!(buf, buf_full, kr, r)
-
-    return ct, ss
+        # Shared secret = first 32 bytes of kr
+        return ct, kr[1:KYBER_SYMBYTES]
+    finally
+        wipe!(buf_full, kr, r)
+    end
 end
 
 function kyber_kem_enc(pk::Vector{UInt8})
     coins = rand(Random.RandomDevice(), UInt8, KYBER_SYMBYTES)
-    res = kyber_kem_enc_derand(pk, coins)
-    wipe!(coins)
-    return res
+    try
+        return kyber_kem_enc_derand(pk, coins)
+    finally
+        wipe!(coins)                        # also when pk fails the input check
+    end
 end
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -481,38 +520,46 @@ end
 function kyber_kem_dec(ct::Vector{UInt8}, sk::Vector{UInt8})
     length(ct) == KYBER_CIPHERTEXTBYTES || throw(ArgumentError("$IDENTIFIER ciphertext must be $KYBER_CIPHERTEXTBYTES bytes"))
     kyber_dk_check(sk) || throw(ArgumentError("$IDENTIFIER decapsulation key failed the FIPS 203 input check"))
-    # Parse the KEM secret key
-    sk_cpa = sk[1:KYBER_INDCPA_SECRETKEYBYTES]
+    # Parse the KEM secret key. The secret parts dk_PKE and z are read in place, never copied.
+    sk_cpa = view(sk, 1:KYBER_INDCPA_SECRETKEYBYTES)
     pk     = sk[KYBER_INDCPA_SECRETKEYBYTES+1:KYBER_INDCPA_SECRETKEYBYTES+KYBER_PUBLICKEYBYTES]
-    h_pk   = sk[KYBER_SECRETKEYBYTES-2*KYBER_SYMBYTES+1:KYBER_SECRETKEYBYTES-KYBER_SYMBYTES]
-    z      = sk[KYBER_SECRETKEYBYTES-KYBER_SYMBYTES+1:KYBER_SECRETKEYBYTES]
+    h_pk   = view(sk, KYBER_SECRETKEYBYTES-2*KYBER_SYMBYTES+1:KYBER_SECRETKEYBYTES-KYBER_SYMBYTES)
+    z      = view(sk, KYBER_SECRETKEYBYTES-KYBER_SYMBYTES+1:KYBER_SECRETKEYBYTES)
 
-    # Decrypt: m' = indcpa_dec(ct, sk_cpa)
-    buf = kyber_indcpa_dec(ct, sk_cpa)
+    buf      = UInt8[]   # m′
+    buf_full = UInt8[]   # m′ ‖ H(pk)
+    kr       = UInt8[]   # (K′, r′)
+    r        = UInt8[]
+    k        = UInt8[]
+    cmp      = UInt8[]   # re-encryption of m′: a function of the secret m′ when ct is rejected
+    try
+        # Decrypt: m' = indcpa_dec(ct, sk_cpa)
+        buf = kyber_indcpa_dec(ct, sk_cpa)
 
-    # buf_full = m' || H(pk)  (H(pk) was stored in sk)
-    buf_full = vcat(buf, h_pk)
+        # buf_full = m' || H(pk)  (H(pk) was stored in sk)
+        buf_full = catbytes(buf, h_pk)
 
-    # kr = G(m' || H(pk))
-    kr = kyber_hash_g(buf_full)
+        # kr = G(m' || H(pk))
+        kr = kyber_hash_g(buf_full)
 
-    # Re-encrypt: cmp = indcpa_enc(m', pk, kr[33:64])
-    r = kr[KYBER_SYMBYTES+1:2*KYBER_SYMBYTES]
-    cmp = kyber_indcpa_enc(buf, pk, r)
+        # Re-encrypt: cmp = indcpa_enc(m', pk, kr[33:64])
+        r = kr[KYBER_SYMBYTES+1:2*KYBER_SYMBYTES]
+        cmp = kyber_indcpa_enc(buf, pk, r)
 
-    # Constant-time verify
-    fail = kyber_verify(ct, cmp)
+        # Constant-time verify
+        fail = kyber_verify(ct, cmp)
 
-    # Compute rejection key: rkprf(z, ct) = SHAKE256(z || ct)
-    ss = kyber_rkprf(z, ct)
+        # Compute rejection key: rkprf(z, ct) = SHAKE256(z || ct)
+        ss = kyber_rkprf(z, ct)
 
-    # If verification passed (fail==0), copy true key kr[1:32] into ss
-    # cmov copies x into r when b==1; C does cmov(ss, kr, KYBER_SYMBYTES, !fail)
-    # !fail: fail=0 -> b=1 (copy), fail=1 -> b=0 (keep rejection key)
-    b = UInt8(1 - fail)
-    k = kr[1:KYBER_SYMBYTES]
-    kyber_cmov!(ss, k, b)
-    wipe!(sk_cpa, z, buf, buf_full, kr, r, k)
-
-    return ss
+        # If verification passed (fail==0), copy true key kr[1:32] into ss
+        # cmov copies x into r when b==1; C does cmov(ss, kr, KYBER_SYMBYTES, !fail)
+        # !fail: fail=0 -> b=1 (copy), fail=1 -> b=0 (keep rejection key)
+        b = UInt8(1 - fail)
+        k = kr[1:KYBER_SYMBYTES]
+        kyber_cmov!(ss, k, b)
+        return ss
+    finally
+        wipe!(buf, buf_full, kr, r, k, cmp)
+    end
 end
