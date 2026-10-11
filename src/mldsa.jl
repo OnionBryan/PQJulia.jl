@@ -7,6 +7,7 @@ module MLDSA
 using SHA
 using Random
 using ..Wipe: wipe!
+using ..Bytes: catbytes   # byte concatenation; Base.vcat trips the dispatch gate (src/bytes.jl)
 import ..Keccak
 
 # Shared primitives — same for all security levels
@@ -49,7 +50,7 @@ for (category, params) in CATEGORY_PARAMS
     import ..MLDSA: poly_pointwise!, poly_pointwise_acc!, poly_add!, poly_sub!
     import ..MLDSA: poly_reduce!, poly_caddq!, poly_shiftl!, poly_chknorm
     import ..MLDSA: poly_uniform!, power2round
-    import ..MLDSA: derived_sizes, wipe!
+    import ..MLDSA: derived_sizes, wipe!, catbytes
 
     import SHA
     import ...Keccak

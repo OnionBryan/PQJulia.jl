@@ -63,7 +63,7 @@ end
 function poly_uniform_eta!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
     # SHAKE256(seed || nonce_le16) with re-squeeze loop (C ref: poly.c:435-453)
     # SHAKE256_RATE = 136; initial blocks: eta=2 → 1 block (136B), eta=4 → 2 blocks (272B)
-    input = vcat(seed, UInt8[nonce & 0xff, (nonce >> 8) & 0xff])
+    input = catbytes(seed, nonce % UInt8, (nonce >> 8) % UInt8)
     nblocks_init = ETA == 2 ? 1 : 2
     total_out = nblocks_init * 136
     buf = Keccak.shake256(input, UInt64(total_out))
@@ -84,7 +84,7 @@ function poly_uniform_eta!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
 end
 
 function poly_uniform_gamma1!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
-    input = vcat(seed, UInt8[nonce & 0xff, (nonce >> 8) & 0xff])
+    input = catbytes(seed, nonce % UInt8, (nonce >> 8) % UInt8)
     buf = Keccak.shake256(input, UInt64(POLYZ_PACKED))
     polyz_unpack!(a, buf)
     wipe!(input, buf)
@@ -92,7 +92,8 @@ function poly_uniform_gamma1!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt
 end
 
 function poly_challenge!(c::Vector{Int32}, seed::Vector{UInt8})
-    # SampleInBall (C ref: poly.c:487-519). Uses incremental SHAKE256 squeeze.
+    # SampleInBall (C ref: poly.c:487-519). Uses incremental SHAKE256 squeeze. When signing, seed
+    # is the c̃ of an attempt that may be rejected, so the SHAKE256(seed) stream is wiped.
     fill!(c, Int32(0))
     total_out = 136  # one SHAKE256 block
     buf = Keccak.shake256(seed, UInt64(total_out))
@@ -104,12 +105,13 @@ function poly_challenge!(c::Vector{Int32}, seed::Vector{UInt8})
     for i in (N - TAU):(N - 1)
         local b
         while true
-            # Re-squeeze if buffer exhausted (C ref: poly.c:509-512)
+            # Re-squeeze if buffer exhausted (C ref: poly.c:509-512). SHAKE output is
+            # prefix-stable, so the longer squeeze is the old buffer followed by the next block.
             if pos > length(buf)
-                new_total = total_out + 136
-                full = Keccak.shake256(seed, UInt64(new_total))
-                buf = vcat(buf, full[total_out+1:new_total])
-                total_out = new_total
+                total_out += 136
+                full = Keccak.shake256(seed, UInt64(total_out))
+                wipe!(buf)
+                buf = full
             end
             b = Int(buf[pos]); pos += 1
             b <= i && break
@@ -118,6 +120,7 @@ function poly_challenge!(c::Vector{Int32}, seed::Vector{UInt8})
         c[b+1] = Int32(1 - 2 * Int32(signs & 1))
         signs >>= 1
     end
+    wipe!(buf)
     return c
 end
 
@@ -246,9 +249,9 @@ function polyz_unpack!(r::Vector{Int32}, a::Vector{UInt8})
     end
     return r
 end
-function polyw1_pack(a::Vector{Int32})::Vector{UInt8}
-    checkbounds(a, 1:N)
-    r = zeros(UInt8, POLYW1_PACKED)
+# w1Encode of one polynomial, written into r (POLYW1_PACKED bytes, every one of them set).
+function polyw1_pack!(r::AbstractVector{UInt8}, a::Vector{Int32})
+    checkbounds(a, 1:N); checkbounds(r, 1:POLYW1_PACKED)
     if GAMMA2 == Int32(div(Q - 1, 32))
         # 4-bit: 2 coefficients per byte (w1 range 0..15)
         @inbounds for i in 0:(N÷2 - 1)
@@ -306,7 +309,7 @@ end
 
 function dilithium_keygen_derand(xi::Vector{UInt8})
     length(xi) == SEEDBYTES || throw(ArgumentError("keygen seed must be $SEEDBYTES bytes"))
-    seed = vcat(xi, UInt8[K, L])
+    seed = catbytes(xi, UInt8(K), UInt8(L))
     expanded = Keccak.shake256(seed, UInt64(2*SEEDBYTES + CRHBYTES))
     rho = expanded[1:SEEDBYTES]
     rhoprime = expanded[SEEDBYTES+1:SEEDBYTES+CRHBYTES]
@@ -375,32 +378,40 @@ end
 
 function dilithium_keygen()
     xi = rand(RandomDevice(), UInt8, SEEDBYTES)
-    kp = dilithium_keygen_derand(xi)
-    wipe!(xi)
-    return kp
+    try
+        return dilithium_keygen_derand(xi)
+    finally
+        wipe!(xi)
+    end
 end
 
 # ==================== SIGN ====================
 
-function unpack_sk(sk::Vector{UInt8})
-    pos = 1
-    rho = sk[pos:pos+SEEDBYTES-1]; pos += SEEDBYTES
-    key = sk[pos:pos+SEEDBYTES-1]; pos += SEEDBYTES
-    tr = sk[pos:pos+TRBYTES-1]; pos += TRBYTES
-
-    s1 = [zeros(Int32, N) for _ in 1:L]
+# skDecode (FIPS 204 Alg. 25) of the secret parts K, s1, s2, t0 into the caller's buffers, so a
+# caller that owns them can wipe them whatever happens after (sign_mu).
+function unpack_sk!(key::Vector{UInt8}, s1::Vector{Vector{Int32}}, s2::Vector{Vector{Int32}},
+                    t0::Vector{Vector{Int32}}, sk::Vector{UInt8})
+    copyto!(key, 1, sk, SEEDBYTES + 1, SEEDBYTES)
+    pos = 2*SEEDBYTES + TRBYTES + 1
     for i in 1:L
         polyeta_unpack!(s1[i], view(sk, pos:pos+POLYETA_PACKED-1)); pos += POLYETA_PACKED
     end
-    s2 = [zeros(Int32, N) for _ in 1:K]
     for i in 1:K
         polyeta_unpack!(s2[i], view(sk, pos:pos+POLYETA_PACKED-1)); pos += POLYETA_PACKED
     end
-    t0 = [zeros(Int32, N) for _ in 1:K]
     for i in 1:K
         polyt0_unpack!(t0[i], view(sk, pos:pos+POLYT0_PACKED-1)); pos += POLYT0_PACKED
     end
-    return rho, key, tr, s1, s2, t0
+    return key, s1, s2, t0
+end
+
+function unpack_sk(sk::Vector{UInt8})
+    key = zeros(UInt8, SEEDBYTES)
+    s1 = [zeros(Int32, N) for _ in 1:L]
+    s2 = [zeros(Int32, N) for _ in 1:K]
+    t0 = [zeros(Int32, N) for _ in 1:K]
+    unpack_sk!(key, s1, s2, t0, sk)
+    return sk[1:SEEDBYTES], key, sk[2*SEEDBYTES+1:2*SEEDBYTES+TRBYTES], s1, s2, t0
 end
 
 function expand_A(rho::Vector{UInt8})
@@ -439,12 +450,26 @@ function compute_w!(w1::Vector{Vector{Int32}}, w0::Vector{Vector{Int32}}, A::Mat
     wipe!(zy)
 end
 
-function compute_challenge(mu::Vector{UInt8}, w1::Vector{Vector{Int32}}, cp::Vector{Int32})
-    w1_packed = UInt8[]
-    for i in 1:K; append!(w1_packed, polyw1_pack(w1[i])); end
-    c_tilde = Keccak.shake256(vcat(mu, w1_packed), UInt64(CTILDEBYTES))
+# The input of H for the challenge, μ ‖ w1Encode(w1) (FIPS 204 Alg. 7 line 15, Alg. 8 line 12),
+# written into r: CHALLENGE_INPUT_BYTES bytes, every one of them set.
+const CHALLENGE_INPUT_BYTES = CRHBYTES + K * POLYW1_PACKED
+function challenge_input!(r::Vector{UInt8}, mu::Vector{UInt8}, w1::Vector{Vector{Int32}})
+    copyto!(r, 1, mu, 1, CRHBYTES)
+    for i in 1:K
+        o = CRHBYTES + (i - 1) * POLYW1_PACKED
+        polyw1_pack!(view(r, o+1:o+POLYW1_PACKED), w1[i])
+    end
+    return r
+end
+
+# One signing attempt's challenge: c̃ = H(μ ‖ w1Encode(w1)), c = SampleInBall(c̃) into cp, and
+# NTT(c). `hin` is the signer's buffer for the hash input (HighBits(Ay) of this attempt) and is
+# wiped here; c̃, c and NTT(c) are the signer's to wipe once the attempt is decided.
+function compute_challenge!(cp::Vector{Int32}, hin::Vector{UInt8}, mu::Vector{UInt8}, w1::Vector{Vector{Int32}})
+    c_tilde = Keccak.shake256(challenge_input!(hin, mu, w1), UInt64(CTILDEBYTES))
+    wipe!(hin)
     poly_challenge!(cp, c_tilde)
-    cp_hat = copy(cp); ntt!(cp_hat)
+    cp_hat = ntt!(copy(cp))
     return c_tilde, cp_hat
 end
 
@@ -533,51 +558,62 @@ function sign_mu(mu::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8})
     length(rnd) == 32 || throw(ArgumentError("rnd must be 32 bytes"))
     length(sk) == SK_BYTES || throw(ArgumentError("$IDENTIFIER secret key must be $SK_BYTES bytes"))
 
-    rho, key, tr, s1, s2, t0 = unpack_sk(sk)
-    # skDecode range check: s1, s2 coefficients must lie in [-η, η] (Wycheproof InvalidPrivateKey)
-    all(v -> all(x -> -ETA <= x <= ETA, v), s1) && all(v -> all(x -> -ETA <= x <= ETA, v), s2) ||
-        throw(ArgumentError("$IDENTIFIER secret key has s1/s2 coefficients outside [-η, η]"))
-    A = expand_A(rho)
-    for i in 1:L; ntt!(s1[i]); end
-    for i in 1:K; ntt!(s2[i]); end
-    for i in 1:K; ntt!(t0[i]); end
-
-    kin = vcat(key, rnd, mu)
-    rhoprime = Keccak.shake256(kin, UInt64(CRHBYTES))
-
-    nonce = 0  # Int, not UInt16 — avoids overflow at 9362 iterations for L=7 (pq-crystals/dilithium#110)
+    # Every secret buffer of the signer exists before the key is decoded, and the `finally` wipes
+    # them all on every exit: a signature, the skDecode range check, or any other exception.
+    key = zeros(UInt8, SEEDBYTES)
+    s1 = [zeros(Int32, N) for _ in 1:L]
+    s2 = [zeros(Int32, N) for _ in 1:K]
+    t0 = [zeros(Int32, N) for _ in 1:K]
+    kin = UInt8[]                                       # K ‖ rnd ‖ μ
+    rhoprime = UInt8[]                                  # ρ″ = H(K ‖ rnd ‖ μ)
     y = [zeros(Int32, N) for _ in 1:L]
     z = [zeros(Int32, N) for _ in 1:L]
     w1 = [zeros(Int32, N) for _ in 1:K]
     w0 = [zeros(Int32, N) for _ in 1:K]
     h = [zeros(Int32, N) for _ in 1:K]
-    cp = zeros(Int32, N)
     tmp = zeros(Int32, N)
+    hin = zeros(UInt8, CHALLENGE_INPUT_BYTES)           # μ ‖ w1Encode(w1) of the current attempt
+    c_tilde = UInt8[]                                   # c̃, c and NTT(c) of the current attempt
+    cp = zeros(Int32, N)
+    cp_hat = Int32[]
+    try
+        unpack_sk!(key, s1, s2, t0, sk)
+        # skDecode range check: s1, s2 coefficients must lie in [-η, η] (Wycheproof InvalidPrivateKey)
+        all(v -> all(x -> -ETA <= x <= ETA, v), s1) && all(v -> all(x -> -ETA <= x <= ETA, v), s2) ||
+            throw(ArgumentError("$IDENTIFIER secret key has s1/s2 coefficients outside [-η, η]"))
+        A = expand_A(sk[1:SEEDBYTES])
+        for i in 1:L; ntt!(s1[i]); end
+        for i in 1:K; ntt!(s2[i]); end
+        for i in 1:K; ntt!(t0[i]); end
 
-    while true
-        sample_y!(y, rhoprime, nonce)
-        compute_w!(w1, w0, A, y, tmp)                  # w1 = HighBits(Ay), w0 = LowBits(Ay)
-        c_tilde, cp_hat = compute_challenge(mu, w1, cp)
-        if compute_z_and_check_norm!(z, cp_hat, s1, y)
-            nonce += 1; continue
+        kin = catbytes(key, rnd, mu)
+        rhoprime = Keccak.shake256(kin, UInt64(CRHBYTES))
+        wipe!(kin)
+
+        nonce = 0  # Int, not UInt16 — avoids overflow at 9362 iterations for L=7 (pq-crystals/dilithium#110)
+        while true
+            sample_y!(y, rhoprime, nonce)
+            compute_w!(w1, w0, A, y, tmp)                  # w1 = HighBits(Ay), w0 = LowBits(Ay)
+            c_tilde, cp_hat = compute_challenge!(cp, hin, mu, w1)
+            if compute_z_and_check_norm!(z, cp_hat, s1, y) ||
+               compute_w0_and_check_norm!(w0, cp_hat, s2, tmp) ||
+               make_hints_and_check!(h, w0, w1, cp_hat, t0)
+                wipe!(c_tilde, cp, cp_hat)                 # the rejected attempt's challenge
+                nonce += 1
+                continue
+            end
+            return pack_signature(c_tilde, z, h)           # copies c̃ before the finally wipes it
         end
-        if compute_w0_and_check_norm!(w0, cp_hat, s2, tmp)
-            nonce += 1; continue
-        end
-        if make_hints_and_check!(h, w0, w1, cp_hat, t0)
-            nonce += 1; continue
-        end
-        sig = pack_signature(c_tilde, z, h)
-        wipe!(key, s1, s2, t0, kin, rhoprime, y, z, w1, w0, h, tmp)
-        return sig
+    finally
+        wipe!(key, s1, s2, t0, kin, rhoprime, y, z, w1, w0, h, tmp, hin, c_tilde, cp, cp_hat)
     end
 end
 
 sk_tr(sk::Vector{UInt8}) = sk[2*SEEDBYTES+1:2*SEEDBYTES+TRBYTES]
-mu_of(tr::Vector{UInt8}, mprime::Vector{UInt8}) = Keccak.shake256(vcat(tr, mprime), UInt64(CRHBYTES))
+mu_of(tr::Vector{UInt8}, mprime::Vector{UInt8}) = Keccak.shake256(catbytes(tr, mprime), UInt64(CRHBYTES))
 
 # M′ for pure ML-DSA (FIPS 204 Alg. 2/3): 0x00 ‖ |ctx| ‖ ctx ‖ M.
-pure_mprime(msg, context) = vcat(UInt8[0x00, UInt8(length(context))], context, msg)
+pure_mprime(msg, context) = catbytes(0x00, UInt8(length(context)), context, msg)
 
 """ML-DSA.Sign_internal (FIPS 204 Alg. 7): signs the formatted message M′ as given, no domain separator."""
 function dilithium_sign_internal(mprime::Vector{UInt8}, sk::Vector{UInt8}, rnd::Vector{UInt8})
@@ -601,9 +637,11 @@ end
 """ML-DSA.Sign (FIPS 204 Alg. 2). Hedged by default (rnd from the OS CSPRNG); `hedged=false` is the deterministic variant."""
 function dilithium_sign(msg::Vector{UInt8}, sk::Vector{UInt8}; hedged::Bool=true, context::Vector{UInt8}=UInt8[])
     rnd = hedged ? rand(RandomDevice(), UInt8, 32) : zeros(UInt8, 32)
-    sig = dilithium_sign_derand(msg, sk, rnd; context=context)
-    wipe!(rnd)
-    return sig
+    try
+        return dilithium_sign_derand(msg, sk, rnd; context=context)
+    finally
+        wipe!(rnd)
+    end
 end
 
 # ==================== VERIFY ====================
@@ -689,9 +727,7 @@ function dilithium_verify_mu(mu::Vector{UInt8}, sig::Vector{UInt8}, pk::Vector{U
     end
 
     # Recompute challenge
-    w1_packed = UInt8[]
-    for i in 1:K; append!(w1_packed, polyw1_pack(w1p[i])); end
-    c2 = Keccak.shake256(vcat(mu, w1_packed), UInt64(CTILDEBYTES))
+    c2 = Keccak.shake256(challenge_input!(zeros(UInt8, CHALLENGE_INPUT_BYTES), mu, w1p), UInt64(CTILDEBYTES))
 
     return c_tilde == c2
 end
@@ -760,7 +796,7 @@ end
 # M′ for HashML-DSA (FIPS 204 Alg. 4/5): 0x01 ‖ |ctx| ‖ ctx ‖ OID ‖ PH(M).
 function prehash_mprime(msg::Vector{UInt8}, hash_alg::String, context::Vector{UInt8})
     haskey(HASH_OIDS, hash_alg) || throw(ArgumentError("Unknown hash algorithm: $hash_alg"))
-    return vcat(UInt8[0x01, UInt8(length(context))], context, HASH_OIDS[hash_alg], prehash_message(msg, hash_alg))
+    return catbytes(0x01, UInt8(length(context)), context, HASH_OIDS[hash_alg], prehash_message(msg, hash_alg))
 end
 
 """HashML-DSA.Sign (FIPS 204 Alg. 4) with caller-supplied 32-byte `rnd`."""
@@ -774,9 +810,11 @@ end
 function dilithium_sign_prehash(msg::Vector{UInt8}, sk::Vector{UInt8}, hash_alg::String;
                                 hedged::Bool=true, context::Vector{UInt8}=UInt8[])
     rnd = hedged ? rand(RandomDevice(), UInt8, 32) : zeros(UInt8, 32)
-    sig = dilithium_sign_prehash_derand(msg, sk, hash_alg, rnd; context=context)
-    wipe!(rnd)
-    return sig
+    try
+        return dilithium_sign_prehash_derand(msg, sk, hash_alg, rnd; context=context)
+    finally
+        wipe!(rnd)
+    end
 end
 
 """HashML-DSA.Verify (FIPS 204 Alg. 5). A context over 255 bytes is rejected (returns false)."""
