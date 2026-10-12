@@ -66,6 +66,8 @@ const COPIES = Vector{Int32}[]    # Int32 vectors copied, and their copies (y, N
 const POLYS = Vector{Int32}[]     # the buffers s1, s2 and t0 are decoded into
 const WIPED = Vector{UInt8}[]     # what each byte buffer held when it was wiped
 const RNDS = Vector{UInt8}[]      # bytes drawn from RandomDevice (keygen ξ, hedged rnd)
+const ZS = Vector{Int32}[]        # every zeros(Int32, n) buffer: s1, s2, t0, y, z, w0, w1, h, tmp, c, A, t1
+const KFAULT = Ref(-1)            # a SHAKE256 input of this length throws Injected() (keygen's tr = H(pk))
 const CHAL_LEN = Ref(0)           # length of the challenge hash input μ ‖ w1Encode(w1)
 const NCHAL = Ref(0)              # challenge hashes so far
 const FAULT = Ref(0)              # > 0: the FAULT[]-th challenge hash throws Injected()
@@ -74,6 +76,7 @@ struct Injected <: Exception end
 function KC.shake256(data::Vector{UInt8}, outlen::UInt64)
     if SPY[]
         push!(SHAKE, data)
+        length(data) == KFAULT[] && throw(Injected())
         if length(data) == CHAL_LEN[]
             NCHAL[] += 1
             NCHAL[] == FAULT[] && throw(Injected())
@@ -82,6 +85,11 @@ function KC.shake256(data::Vector{UInt8}, outlen::UInt64)
     out = invoke(KC.shake256, Tuple{AbstractVector{UInt8}, Integer}, data, outlen)
     SPY[] && push!(SHAKE, out)
     out
+end
+function Base.zeros(::Type{Int32}, n::Int)
+    r = invoke(zeros, Tuple{Type{Int32}, Vararg{Integer}}, Int32, n)
+    SPY[] && push!(ZS, r)
+    r
 end
 function Base.copy(a::Vector{Int32})
     r = invoke(copy, Tuple{Array}, a)
@@ -108,7 +116,7 @@ end
 
 # Run f with the spies on; return its value, or the exception it threw.
 function spied(f)
-    foreach(empty!, (SHAKE, COPIES, POLYS, WIPED, RNDS)); NCHAL[] = 0
+    foreach(empty!, (SHAKE, COPIES, POLYS, WIPED, RNDS, ZS)); NCHAL[] = 0
     SPY[] = true
     try
         f()
@@ -119,6 +127,8 @@ function spied(f)
     end
 end
 allzero(bufs) = all(b -> all(iszero, b), bufs)
+# Every recorded Int32 buffer except those holding public data (rows of A, of t1) is zero.
+secretzero(bufs, public) = all(b -> all(iszero, b) || b in public, bufs)
 report(id, C, ok) = (println("CHECK\t", id, "\t", C.IDENTIFIER, "\t", ok); flush(stdout))
 
 for C in (MLDSA.Category2, MLDSA.Category3, MLDSA.Category5)
@@ -127,16 +137,19 @@ for C in (MLDSA.Category2, MLDSA.Category3, MLDSA.Category5)
     K = sk[33:64]
     msg = collect(UInt8, 1:40); rnd = fill(0x33, 32)
     npolys = C.L + 2 * C.K
+    A = Set(vec(C.expand_A(sk[1:32])))
+    t1 = Set(begin r = zeros(Int32, C.N); C.polyt1_unpack!(r, pk[33 + (i-1)*C.POLYT1_PACKED : 32 + i*C.POLYT1_PACKED]); r end for i in 1:C.K)
 
     # F2. External-μ signing computes no public μ, so every SHAKE256 input and output of the
     # call (ρ″ and its input, each attempt's y stream, H input, c̃ and SampleInBall stream) is
     # secret until zeroed, and so is every Int32 vector it copies (y, NTT(y), c, NTT(c)).
-    shake_ok = copies_ok = true; seen = 0; mu_multi = UInt8[]
+    shake_ok = copies_ok = zeros_ok = true; seen = 0; mu_multi = UInt8[]
     for m in 0x00:0x3f
         mu = fill(m, 64)
         sig = spied(() -> C.dilithium_sign_internal_mu(mu, sk, rnd))
         shake_ok &= sig isa Vector{UInt8} && C.dilithium_verify_mu(mu, sig, pk) && NCHAL[] >= 1 && allzero(SHAKE)
         copies_ok &= !isempty(COPIES) && allzero(COPIES)
+        zeros_ok &= count(in(A), ZS) == C.K * C.L && secretzero(ZS, A)   # y, z, w0, w1, h, tmp, c, s1, s2, t0
         NCHAL[] >= 3 && isempty(mu_multi) && (mu_multi = mu)
         seen += 1
         seen >= 8 && !isempty(mu_multi) && break
@@ -144,6 +157,7 @@ for C in (MLDSA.Category2, MLDSA.Category3, MLDSA.Category5)
     report("F2.rejected", C, !isempty(mu_multi))
     report("F2.shake", C, shake_ok)
     report("F2.copies", C, copies_ok)
+    report("F2.zeros", C, zeros_ok)
 
     # F3/F14/F26. A key whose last s2 byte decodes outside [-η, η], through every signing entry point.
     bad = copy(sk); bad[2 * 32 + 64 + (C.L + C.K) * C.POLYETA_PACKED] = 0xff
@@ -168,7 +182,7 @@ for C in (MLDSA.Category2, MLDSA.Category3, MLDSA.Category5)
     e = spied(() -> C.dilithium_sign_internal_mu(mu_multi, sk, rnd))
     FAULT[] = 0
     report("F3.fault", C, e isa Injected && NCHAL[] == 2 && length(POLYS) == npolys && allzero(POLYS) &&
-                          allzero(SHAKE) && allzero(COPIES) && any(==(K), WIPED))
+                          allzero(SHAKE) && allzero(COPIES) && secretzero(ZS, A) && any(==(K), WIPED))
 
     # F4. The hedged rnd is wiped whether signing returns or throws.
     errs = (() -> C.dilithium_sign(msg, bad),
@@ -191,18 +205,28 @@ for C in (MLDSA.Category2, MLDSA.Category3, MLDSA.Category5)
     report("F4.return", C, ok)
     kp = spied(() -> C.dilithium_keygen())
     report("keygen.xi", C, kp isa Tuple && length(RNDS) == 1 && all(iszero, RNDS[1]))
+
+    # Keygen interrupted by an exception at tr = H(pk), after every secret exists: the seed input,
+    # its expansion ρ ‖ ρ′ ‖ K, s1, s2, NTT(s1), t and t0 are zeroed.
+    KFAULT[] = C.PK_BYTES
+    e = spied(() -> C.dilithium_keygen_derand(fill(0x5a, 32)))
+    KFAULT[] = -1
+    report("keygen.fault", C, e isa Injected && length(SHAKE) >= 2 && all(iszero, SHAKE[1]) && all(iszero, SHAKE[2]) &&
+                              count(in(A), ZS) == C.K * C.L && count(in(t1), ZS) == C.K && secretzero(ZS, union(A, t1)))
 end
 """
 
 checks = ("F2.rejected" => "a signature with rejected attempts was observed",
           "F2.shake"    => "every attempt's H input (μ ‖ w1Encode), c̃, SampleInBall stream, y stream and ρ″ zeroed",
           "F2.copies"   => "every attempt's c, NTT(c), y and NTT(y) zeroed",
+          "F2.zeros"    => "every signer buffer but the public A zeroed (y, z, w0, w1, h, tmp, c, s1, s2, t0)",
           "F3.polys"    => "out-of-range key, 6 signing entry points: decoded s1, s2, t0 zeroed",
           "F3.key"      => "out-of-range key, 6 signing entry points: decoded K zeroed",
           "F3.fault"    => "exception in the second attempt: K, s1, s2, t0, ρ″, y and challenge buffers zeroed",
           "F4.throw"    => "hedged rnd zeroed when dilithium_sign / dilithium_sign_prehash throw (6 error paths)",
           "F4.return"   => "hedged rnd zeroed after a signature",
-          "keygen.xi"   => "keygen seed ξ zeroed")
+          "keygen.xi"   => "keygen seed ξ zeroed",
+          "keygen.fault" => "exception in keygen: seed, ρ ‖ ρ′ ‖ K, s1, s2, NTT(s1), t, t0 zeroed")
 
 @testset "F2, F3, F4: secret buffers wiped on every attempt and every exit (child process)" begin
     proj = Base.active_project()

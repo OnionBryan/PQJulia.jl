@@ -20,12 +20,15 @@ import ..Wipe: wipe!
 
 # The Falcon decoders index byte strings from 1. `onebased(x)` is `x`, or a 1-based copy when `x`
 # has other axes (an OffsetArray, a view through Base.IdentityUnitRange). `with_onebased(f, sk)`
-# does the same for a secret key and wipes the copy when `f` returns or throws.
+# hands the decoders a secret key as a plain Vector: any other AbstractVector (other axes, a view,
+# a key store whose reads can fail) is copied inside the `try`, so the copy is wiped when `f`
+# returns or throws and also when reading the key fails part-way.
 onebased(x::AbstractVector{UInt8}) = Base.has_offset_axes(x) ? copyto!(Vector{UInt8}(undef, length(x)), x) : x
 function with_onebased(f, x::AbstractVector{UInt8})
-    Base.has_offset_axes(x) || return f(x)
-    y = copyto!(Vector{UInt8}(undef, length(x)), x)
+    x isa Vector{UInt8} && return f(x)
+    y = Vector{UInt8}(undef, length(x))
     try
+        copyto!(y, x)
         f(y)
     finally
         wipe!(y)

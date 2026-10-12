@@ -52,6 +52,20 @@ child process and cover the success paths, every rejection path and injected exc
 - The runtime-dispatch check (`test/timing/dispatch.jl`) failed on Julia 1.12.1 on every ML-KEM,
   ML-DSA, Falcon-signing and X-Wing path: `Base.vcat` of byte vectors builds its assertion message
   through dynamic dispatch. Byte strings are joined with `catbytes` (src/bytes.jl); every row reads 0.
+- Found by an adversarial review of the fixes above:
+  - `catbytes` and the multi-buffer `wipe!` were written with a plain `xs...`, so Julia compiled
+    them for a widened Vararg signature and every call on the ML-KEM keygen, ML-DSA signing and
+    X-Wing paths splatted through runtime dispatch, which JET does not report. Both specialize on
+    the argument count now; `test/specialization.jl` walks the compiled call graph of every
+    secret path and fails on any widened Vararg specialization.
+  - ML-DSA keygen wiped its seed expansion, s1, s2, NTT(s1), t and t0 only on success; it now
+    wipes them, and the partial secret key, on every exit.
+  - A Falcon secret key given as a non-`Vector` whose reads fail part-way (a key store) left a
+    partial copy, or the decoded f and g, unwiped; Shamir reconstruction left a plain-data copy
+    of `Int` shares.
+  - `FalconFFT.fft` and `FalconCertify.nttm` threw on a range; `poly_mul_modq`, `poly_div_modq`
+    and `is_invertible` read outside a vector with offset axes; `verify_poly` threw for a public
+    key of another degree instead of returning `false`; `NTRUSolveFailure()` did not exist.
 - `wipe!` on a non-`Array` argument recursed until a stack overflow; Falcon secret types printed
   their key material in the REPL (now `<secret>`); `shamir_reconstruct_bytes` ignored `nbytes`.
 

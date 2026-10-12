@@ -176,6 +176,8 @@ include("regressions_mlkem_xwing.jl")
 include("attack_regressions.jl")
 include("wipe.jl")
 include("regressions_mldsa.jl")
+include("regressions_review.jl")
+include("specialization.jl")
 
 @testset "FN-DSA API ($(M.IDENTIFIER))" for M in (FNDSA.Falcon512, FNDSA.Falcon1024)
     pk, sk = M.falcon_keygen()

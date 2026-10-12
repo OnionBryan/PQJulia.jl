@@ -592,13 +592,17 @@ end
 # Returns the unsigned fields, or `nothing` on a length mismatch or non-zero padding.
 function unpack_bits(bytes, n, bits)
     length(bytes) == cld(n * bits, 8) || return nothing
-    vals = Vector{Int}(undef, n); acc = UInt64(0); nacc = 0; k = 0; mask = (UInt64(1) << bits) - 1
-    for b in bytes
-        acc = (acc << 8) | b; nacc += 8
-        while nacc >= bits && k < n
-            nacc -= bits; k += 1; vals[k] = Int((acc >> nacc) & mask)
+    vals = zeros(Int, n); acc = UInt64(0); nacc = 0; k = 0; mask = (UInt64(1) << bits) - 1
+    try                                                     # a read of `bytes` can throw
+        for b in bytes
+            acc = (acc << 8) | b; nacc += 8
+            while nacc >= bits && k < n
+                nacc -= bits; k += 1; vals[k] = Int((acc >> nacc) & mask)
+            end
+            acc &= (UInt64(1) << nacc) - 1
         end
-        acc &= (UInt64(1) << nacc) - 1
+    catch
+        wipe!(vals); rethrow()
     end
     (k == n && acc == 0) ? vals : (wipe!(vals); nothing)   # secret-key fields: no partial copy left
 end
@@ -639,9 +643,15 @@ function decode_sk(skb::AbstractVector{UInt8})
     n = 1 << lg; b = FG_BITS[lg]
     length(skb) == sk_bytes(n) || return nothing
     lf = (n * b) ÷ 8
-    f = decode_signed(@view(skb[2:1+lf]), n, b)
-    g = decode_signed(@view(skb[2+lf:1+2lf]), n, b)
-    F = decode_signed(@view(skb[2+2lf:end]), n, FFGG_BITS)
+    f = g = F = nothing
+    try                                                     # a read of `skb` can throw
+        f = decode_signed(@view(skb[2:1+lf]), n, b)
+        g = decode_signed(@view(skb[2+lf:1+2lf]), n, b)
+        F = decode_signed(@view(skb[2+2lf:end]), n, FFGG_BITS)
+    catch
+        for x in (f, g, F); x === nothing || wipe!(x); end
+        rethrow()
+    end
     if f === nothing || g === nothing || F === nothing
         for x in (f, g, F); x === nothing || wipe!(x); end
         return nothing

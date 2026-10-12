@@ -309,71 +309,81 @@ end
 
 function dilithium_keygen_derand(xi::Vector{UInt8})
     length(xi) == SEEDBYTES || throw(ArgumentError("keygen seed must be $SEEDBYTES bytes"))
+    # Every secret buffer exists before the `try`; the `finally` wipes them on every exit, and an
+    # exception also wipes the partial secret key.
     seed = catbytes(xi, UInt8(K), UInt8(L))
-    expanded = Keccak.shake256(seed, UInt64(2*SEEDBYTES + CRHBYTES))
-    rho = expanded[1:SEEDBYTES]
-    rhoprime = expanded[SEEDBYTES+1:SEEDBYTES+CRHBYTES]
-    key = expanded[SEEDBYTES+CRHBYTES+1:2*SEEDBYTES+CRHBYTES]
-
-    # Expand A
-    A = [zeros(Int32, N) for _ in 1:K, _ in 1:L]
-    for i in 1:K, j in 1:L
-        poly_uniform!(A[i,j], rho, UInt16((i-1) << 8 | (j-1)))
-    end
-
-    # Sample s1, s2
+    expanded = UInt8[]; rhoprime = UInt8[]; key = UInt8[]
     s1 = [zeros(Int32, N) for _ in 1:L]
-    for i in 1:L
-        poly_uniform_eta!(s1[i], rhoprime, UInt16(i-1))
-    end
     s2 = [zeros(Int32, N) for _ in 1:K]
-    for i in 1:K
-        poly_uniform_eta!(s2[i], rhoprime, UInt16(L + i - 1))
-    end
-
-    # t = As1 + s2
-    s1hat = [copy(s) for s in s1]
-    for i in 1:L; ntt!(s1hat[i]); end
-
-    # One row of t at a time, split by power2round: t = t1*2^D + t0
+    s1hat = [zeros(Int32, N) for _ in 1:L]
     t = zeros(Int32, N)
-    t1 = [zeros(Int32, N) for _ in 1:K]
     t0 = [zeros(Int32, N) for _ in 1:K]
-    for i in 1:K
-        fill!(t, Int32(0))
-        for j in 1:L
-            poly_pointwise_acc!(t, A[i,j], s1hat[j])
+    e = UInt8[]
+    sk = sizehint!(UInt8[], SK_BYTES)                            # no regrowth copies
+    try
+        expanded = Keccak.shake256(seed, UInt64(2*SEEDBYTES + CRHBYTES))
+        rho = expanded[1:SEEDBYTES]
+        rhoprime = expanded[SEEDBYTES+1:SEEDBYTES+CRHBYTES]
+        key = expanded[SEEDBYTES+CRHBYTES+1:2*SEEDBYTES+CRHBYTES]
+
+        # Expand A
+        A = [zeros(Int32, N) for _ in 1:K, _ in 1:L]
+        for i in 1:K, j in 1:L
+            poly_uniform!(A[i,j], rho, UInt16((i-1) << 8 | (j-1)))
         end
-        poly_reduce!(t)
-        invntt!(t)
-        poly_add!(t, t, s2[i])
-        poly_caddq!(t)
-        for j in 1:N
-            t1[i][j], t0[i][j] = power2round(t[j])
+
+        # Sample s1, s2
+        for i in 1:L
+            poly_uniform_eta!(s1[i], rhoprime, UInt16(i-1))
         end
-    end
+        for i in 1:K
+            poly_uniform_eta!(s2[i], rhoprime, UInt16(L + i - 1))
+        end
 
-    # Pack pk = rho || t1
-    pk = copy(rho)
-    for i in 1:K; append!(pk, polyt1_pack(t1[i])); end
+        # t = As1 + s2
+        for i in 1:L; copyto!(s1hat[i], s1[i]); ntt!(s1hat[i]); end
 
-    # tr = H(pk)
-    tr = Keccak.shake256(pk, UInt64(TRBYTES))
+        # One row of t at a time, split by power2round: t = t1*2^D + t0
+        t1 = [zeros(Int32, N) for _ in 1:K]
+        for i in 1:K
+            fill!(t, Int32(0))
+            for j in 1:L
+                poly_pointwise_acc!(t, A[i,j], s1hat[j])
+            end
+            poly_reduce!(t)
+            invntt!(t)
+            poly_add!(t, t, s2[i])
+            poly_caddq!(t)
+            for j in 1:N
+                t1[i][j], t0[i][j] = power2round(t[j])
+            end
+        end
 
-    # Pack sk = rho || key || tr || s1 || s2 || t0
-    sk = append!(sizehint!(UInt8[], SK_BYTES), rho, key, tr)   # no regrowth copies
-    for i in 1:L
-        e = polyeta_pack(s1[i]); append!(sk, e); wipe!(e)
-    end
-    for i in 1:K
-        e = polyeta_pack(s2[i]); append!(sk, e); wipe!(e)
-    end
-    for i in 1:K
-        e = polyt0_pack(t0[i]); append!(sk, e); wipe!(e)
-    end
-    wipe!(seed, expanded, rhoprime, key, s1, s2, s1hat, t, t0)
+        # Pack pk = rho || t1
+        pk = copy(rho)
+        for i in 1:K; append!(pk, polyt1_pack(t1[i])); end
 
-    return pk, sk
+        # tr = H(pk)
+        tr = Keccak.shake256(pk, UInt64(TRBYTES))
+
+        # Pack sk = rho || key || tr || s1 || s2 || t0
+        append!(sk, rho, key, tr)
+        for i in 1:L
+            e = polyeta_pack(s1[i]); append!(sk, e); wipe!(e)
+        end
+        for i in 1:K
+            e = polyeta_pack(s2[i]); append!(sk, e); wipe!(e)
+        end
+        for i in 1:K
+            e = polyt0_pack(t0[i]); append!(sk, e); wipe!(e)
+        end
+        return pk, sk
+    catch
+        wipe!(sk)
+        rethrow()
+    finally
+        wipe!(seed, expanded, rhoprime, key, s1, s2, s1hat, t, t0, e)
+    end
 end
 
 function dilithium_keygen()

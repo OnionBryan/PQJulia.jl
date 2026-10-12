@@ -66,7 +66,7 @@ function shamir_reconstruct(shares::Vector{Tuple{Int, T}}, k::Int, p::Integer=PR
     length(shares) < k && throw(ArgumentError("Need >= $k shares, got $(length(shares))"))
     check_modulus(p)
 
-    subset = shares[1:k]
+    subset = view(shares, 1:k)          # no copy: Int shares would leave their values in plain data
 
     # Validate: no duplicate x-coordinates in the field (x and x + p are the same point)
     xs = [mod(big(s[1]), p) for s in subset]
