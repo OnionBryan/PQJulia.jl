@@ -2,6 +2,73 @@
 
 ## Unreleased
 
+### Fixed
+
+Defects found by an internal sweep of every subsystem; each has a regression test
+(`test/regressions_mldsa.jl`, `test/regressions_mlkem_xwing.jl`, `test/regressions_falcon.jl`,
+`test/regressions_falcon_mrm.jl`, `test/wipe.jl`, `test/runtests.jl`). The wipe checks run in a
+child process and cover the success paths, every rejection path and injected exceptions.
+
+- Secrets left in memory. Every secret buffer is now allocated before a `try` and zeroed in its
+  `finally`, so it is wiped on every exit, an exception included.
+  - ML-KEM: the basemul scratch held Â∘ŝ_k, t̂_k∘r̂_k or ŝ_k∘NTT(u)_k after every keygen,
+    encapsulation and decapsulation, and ŝ_k is recoverable from the decapsulation one and the
+    public ciphertext; decapsulation never wiped the re-encryption of m′, which is a function of
+    the secret m′ when the ciphertext is rejected.
+  - ML-DSA: each rejected attempt left its challenge input μ ‖ w1Encode(w1), c̃, c, NTT(c) and the
+    SampleInBall stream; a secret key failing the s1/s2 range check left the decoded K, s1, s2
+    and t0; a signing error left the hedged `rnd`.
+  - X-Wing: an encapsulation key failing the ML-KEM check left the X25519 scalar, m and the X25519
+    shared secret; the key is now checked before anything is derived from the seed.
+  - FALCON-MRM: signing never wiped the targets t0, t1 (with the public c they give f and F), the
+    sampler seed, the ChaCha20 state and keystream, or rejected candidates.
+  - Falcon keygen left its 56-byte ChaCha20 seed, which alone regenerates the key, the generator,
+    every candidate f, g and the sampler and floating-point scratch; decoding a byte key left
+    f mod q, G mod q, NTT(f) and f·G; key expansion that refused a key left the decoded f, g, F, G;
+    `Falcon.sign(msg, sk::NamedTuple)` never wiped the FFT basis and ffLDL tree it built; the byte-key
+    API wiped the expanded key only when signing succeeded; `falcon_certify` left its temporaries;
+    a rejected signing attempt left its candidate and partial encoding.
+- `wipe!`:
+  - wrote zeros into an immutable String through `codeunits`, corrupting string literals and
+    Dict keys; read-only storage (code units, ranges, unknown array types) is now an
+    `ArgumentError`;
+  - on strided views, transposes and BitArrays the barrier received a null pointer, so LLVM
+    dropped the element-wise zeroing as dead stores; it now receives the storage pointer;
+  - cleared `length * sizeof(T)` bytes of a view or `Memory`, too few for padded element types.
+- Shamir:
+  - `shamir_reconstruct` with k ≤ 0 returned the secret 0;
+  - `shamir_share` accepted n ≥ p (the share at x = p is the secret) and a composite p;
+  - x-coordinates whose difference overflows `Int` reconstructed a wrong secret;
+  - `shamir_share_bytes` left a hex `String` copy of the secret (bytes now go through
+    `mpz_import`/`mpz_export`).
+- Inputs with other axes: `kyber_ek_check` accepted an invalid encapsulation key and rejected
+  every valid one when given a 0-based vector; `kyber_dk_check`, X25519, X-Wing, FALCON-MRM and
+  the Falcon byte-key API threw or misread such inputs. `xwing_encaps_derand` threw
+  `MethodError` for a `Memory` or range seed.
+- Falcon keygen's bare `catch` around the NTRU solver swallowed `InterruptException` (Ctrl-C) and
+  every other error; only the solver's `NTRUSolveFailure` is caught now.
+- `FalconMRM.encode(μ, k)` returned k − 1 elements for odd k; it now returns k (the last is 0),
+  and `decode` is its exact inverse.
+- The runtime-dispatch check (`test/timing/dispatch.jl`) failed on Julia 1.12.1 on every ML-KEM,
+  ML-DSA, Falcon-signing and X-Wing path: `Base.vcat` of byte vectors builds its assertion message
+  through dynamic dispatch. Byte strings are joined with `catbytes` (src/bytes.jl); every row reads 0.
+- `wipe!` on a non-`Array` argument recursed until a stack overflow; Falcon secret types printed
+  their key material in the REPL (now `<secret>`); `shamir_reconstruct_bytes` ignored `nbytes`.
+
+### Changed
+
+- ML-DSA input errors (context over 255 bytes, unknown pre-hash algorithm, wrong lengths) raise
+  `ArgumentError` instead of `ErrorException`.
+- Shamir raises `ArgumentError` for k < 1, an empty byte secret, a non-prime modulus and n ≥ p;
+  `shamir_reconstruct_bytes` raises it when the secret does not fit in `nbytes`.
+- `wipe!` raises `ArgumentError` for read-only storage and for arrays it cannot write through.
+- `FalconMRM.decode(z, B)` returns `nothing` unless B = max_bits(length(z)); `max_bits` and
+  `encode` reject negative k.
+- Falcon keygen zeroes the buffer its `randombytes` callback returns, as signing already did; a
+  callback must return a fresh buffer on each call.
+- `FNDSA.FalconNTRUGen.NTRUSolveFailure` signals an (f, g) without an NTRU solution; the
+  fixed-point solver raises it where it raised `InexactError`. Keys are unchanged.
+
 ### Security
 
 - Falcon key expansion computes each ffLDL leaf σ/√d twice, the second time on an operand passed

@@ -78,25 +78,34 @@ a fault earlier in the FFT or LDL, or a change that leaves a leaf inside [σmin,
 
 ## Secrets in memory
 
-Every secret buffer the package allocates is zeroed before the call returns: `wipe!` writes
-zeros and then passes the buffer to an empty inline-assembly statement, so the compiler cannot
-drop the zeroing as a dead store (`test/wipe.jl` checks the compiled code). Secret keys are built
-into storage reserved at full size, so no partial copy is left behind by a reallocation.
+Every secret buffer the package allocates is zeroed before the call returns, on every exit: a
+result, a rejection, or an exception. Secret buffers are allocated before a `try` and wiped in its
+`finally`. `wipe!` writes zeros and then passes the storage pointer to an empty inline-assembly
+statement, so the compiler cannot drop the zeroing as a dead store (`test/wipe.jl` checks the
+compiled code, including strided views). It accepts arrays whose storage is an `Array`, `Memory`
+or `BitArray` (views, reshapes, reinterpretations, transposes of them) and raises `ArgumentError`
+for read-only storage such as a String's code units or a range. Secret keys are built into storage
+reserved at full size, so no partial copy is left behind by a reallocation. The regression tests
+(`test/regressions_*.jl`) check each path in a child process by recording the buffers the code
+allocates and, for Falcon on Linux, by scanning the process memory for key material.
 
 | Scheme | Wiped |
 |--------|-------|
-| ML-KEM | keygen seed expansion, σ, s and e, PRF and noise buffers; encapsulation m, (K, r) and the noise vectors; decapsulation s, m′, (K′, r′), z and the rejection-key input |
-| ML-DSA | keygen seed expansion, ρ′, K, s1, s2, t and t0; the decoded s1, s2 and t0 when signing, K, ρ′, y, z, w0, the hints and the packing buffers of every attempt |
-| X-Wing | the expanded ML-KEM key and X25519 scalar, the encapsulation seed and both partial shared secrets |
+| ML-KEM | keygen seed expansion, σ, s and e, Â∘ŝ, PRF and noise buffers; encapsulation (K, r), r, e1, e2, Âᵀ∘r̂ and t̂ᵀ∘r̂; decapsulation ŝ, ŝᵀ∘û, m′, (K′, r′), the re-encryption of m′ and the rejection-key input; the basemul scratch on every path. Decapsulation reads dk_PKE and z in place, without a copy |
+| ML-DSA | keygen ξ, seed expansion, ρ′, K, s1, s2, t and t0; when signing, the decoded K, s1, s2 and t0, ρ″, y, z, w0, w1 and the hints, and for every attempt, rejected or accepted, the challenge input μ ‖ w1Encode(w1), c̃, c, NTT(c) and the SampleInBall stream; the hedged `rnd` |
+| X-Wing | the expanded ML-KEM key and X25519 scalar, the encapsulation seed and both partial shared secrets; the ML-KEM key check runs before anything is derived from the seed |
 | X25519 | holds its scalar and field elements in immutable tuples, which leave no heap copy |
 | SHAKE, SHA3 | the Keccak state is an immutable tuple (keccak.jl), which leaves no heap copy |
-| Falcon | the decoded f, g, F, G, the FFT basis and the ffLDL tree whenever the API decodes a byte key for one call; keygen's key once encoded; the signer's FFT and ffSampling arrays, and the ChaCha20 state and keystream, which SamplerZ reads in place |
+| Falcon | whenever the API decodes a byte key for one call: the decoded f, g, F, G, every mod-q, NTT and product copy that decoding computes, the FFT basis and the ffLDL tree, also when expansion refuses the key or signing throws; in keygen, the ChaCha20 seed (which alone regenerates the key) and generator, every candidate f, g, accepted or rejected, and the sampler, floating-point and NTT scratch; when signing (Falcon and FALCON-MRM), the targets t0, t1, the FFT and ffSampling arrays, the ChaCha20 seed, state and keystream, which SamplerZ reads in place, and every rejected candidate and its partial encoding |
 
 What the caller owns stays the caller's to erase: secret keys, returned shared secrets, and an
-expanded Falcon key (`falcon_wipe!(ek)`). `wipe!` is exported for this. Not wiped: BigInt (GMP)
-values in Falcon keygen and in Shamir. Julia's
-garbage collector does not move
-objects, but it does not lock pages either, so memory can reach swap or a core dump.
+expanded Falcon key (`falcon_wipe!(ek)`). `wipe!` is exported for this. Falcon keygen and signing
+zero the buffers their `randombytes` callback returns, so a callback must return a fresh buffer on
+each call. Not wiped: BigInt (GMP) values in Falcon keygen, in `falcon_certify` and in Shamir
+(the byte API converts with `mpz_import`/`mpz_export` and leaves no String or byte copy), and a
+helper's own temporary when an asynchronous exception (`InterruptException`, `OutOfMemoryError`)
+interrupts it. Julia's garbage collector does not move objects, but it does not lock pages
+either, so memory can reach swap or a core dump.
 
 ## Known Issues Addressed
 
@@ -124,6 +133,12 @@ objects, but it does not lock pages either, so memory can reach swap or a core d
 | Falcon signed with any key whose ffLDL leaves passed the GS-norm test only on paper | NIST FIPS 206 status update (Oct 2025) | Fixed — signing refuses keys with a leaf outside [σmin, σmax]; `falcon_keygen(certified=true)` and `falcon_certify` decide the leaf and GS-norm bounds exactly |
 | One fault in the ffLDL leaf square root at key expansion biases every later signature and recovers the key; the leaf range check alone leaves 34–65% of keys recoverable | Kaihara et al., ePrint 2026/2046 (CCS 2026) | Mitigated — each leaf computed twice, expansion refuses the key on a mismatch; leaf range re-checked, branch-free, before every signature ([Physical side channels](#physical-side-channels)) |
 | A decapsulation check that leaves one ciphertext coordinate unverified permits key recovery (no-op `cmov` in pqc_kyber, truncated comparison in wolfSSL) | Das, ePrint 2026/2239 | Not affected — every byte compared, rejection key selected fail-closed; `test/attack_regressions.jl` tampers every ciphertext byte |
+| Secret intermediates left in memory: the ML-KEM basemul scratch (ŝ_k recoverable from one decapsulation and its ciphertext) and the decapsulation re-encryption of m′; ML-DSA per-attempt challenge buffers; FALCON-MRM targets t0, t1 (f and F from the public c) and sampler seed; the Falcon keygen seed (regenerates the key) and decoding's mod-q and NTT copies; every buffer on error paths | Internal bug sweep (2026-10) | Fixed — wiped in `finally` on every exit; `test/regressions_*.jl` |
+| `wipe!` wrote into immutable Strings through `codeunits`, lost the zeroing of strided views and transposes to dead-store elimination, and cleared too few bytes for padded element types | Internal bug sweep (2026-10) | Fixed — read-only storage refused; storage pointer passed to the barrier; `elsize` bytes |
+| `kyber_ek_check` accepted an invalid encapsulation key (and rejected valid ones) passed as a 0-based vector; X25519, X-Wing and the Falcon byte API misread such inputs | Internal bug sweep (2026-10) | Fixed — indexed from `firstindex` or copied to 1-based storage |
+| Shamir: k ≤ 0 reconstructed the secret 0; n ≥ p put the secret in a share; a composite p was accepted; `Int` overflow in x-coordinate differences gave a wrong secret | Internal bug sweep (2026-10) | Fixed — `ArgumentError`; BigInt interpolation |
+| Falcon keygen's bare `catch` around the NTRU solver swallowed `InterruptException` and every other error | Internal bug sweep (2026-10) | Fixed — only `NTRUSolveFailure` is caught |
+| `test/timing/dispatch.jl` failed on Julia 1.12.1: `Base.vcat` of byte vectors builds its assertion message through dynamic dispatch | Internal bug sweep (2026-10) | Fixed — `catbytes` (src/bytes.jl); every row 0 |
 | ML-DSA builds that drop a load-bearing reduction before the inverse NTT overflow Int32 and still pass KATs (wolfSSL small build) | Lee, Lim, Yoon, ePrint 2026/1032 | Not affected — all reductions present; `test/attack_regressions.jl` checks every `invntt!` input during keygen, signing and verification and compares worst-case pipelines with a schoolbook product |
 
 ## Falcon Key Certificate
