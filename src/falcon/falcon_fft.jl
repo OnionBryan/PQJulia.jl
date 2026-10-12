@@ -24,7 +24,9 @@ const q = 12 * 1024 + 1   # 12289
 scrub!(x::AbstractArray{T}) where {T} = isbitstype(T) ? wipe!(x) : x
 
 # ── Coefficient-domain helpers (common.py) ──────────────────────────────────
-split(f) = (f[1:2:end], f[2:2:end])                       # (even, odd) coeffs
+# (even, odd) coeffs as fresh Vectors, whatever f is (a range, a view, other axes): one copy each,
+# which fft wipes.
+split(f) = ([f[i] for i in firstindex(f):2:lastindex(f)], [f[i] for i in firstindex(f)+1:2:lastindex(f)])
 function merge(f0, f1)
     n = 2 * length(f0); f = Vector{eltype(f0)}(undef, n)
     @inbounds for i in 1:length(f0); f[2i-1] = f0[i]; f[2i] = f1[i]; end
@@ -55,7 +57,7 @@ roots(n) = ispow2(n) && n <= 1024 ? ROOT_TABLE[trailing_zeros(n) + 1] : rootsof(
 # Keygen and the Float64 signer run these on secret polynomials, so the coefficient halves and
 # the half-size transforms of every level are zeroed before returning.
 function fft(f::AbstractVector)
-    length(f) == 1 && return ComplexF64[f[1]]
+    length(f) == 1 && return ComplexF64[first(f)]
     f0, f1 = split(f)
     a, b = fft(f0), fft(f1)
     F = merge_fft(a, b)
@@ -63,7 +65,7 @@ function fft(f::AbstractVector)
     F
 end
 function ifft(F::AbstractVector)
-    length(F) == 1 && return ComplexF64[F[1]]
+    length(F) == 1 && return ComplexF64[first(F)]
     F0, F1 = split_fft(F)
     a, b = ifft(F0), ifft(F1)
     f = merge(a, b)

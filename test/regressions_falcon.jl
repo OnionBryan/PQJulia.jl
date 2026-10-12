@@ -343,6 +343,105 @@ end # module FalconSweepRegressions
         @test occursin("non-coprime", sprint(showerror, NG.NTRUSolveFailure("non-coprime resultants")))
     end
 
+    @testset "review fixes: ranges, offset axes, wrong-degree keys, NTRUSolveFailure()" begin
+        FF = R.FF; FC = R.FC; FE = PQJulia.FNDSA.FalconEncoding
+        @test FF.fft(1:8) == FF.fft(collect(1:8)) && FF.fft(0.0:7.0) == FF.fft(collect(0.0:7.0))
+        P = FC.ModRing(8, FC.ntt_primes(8, 1)[1])
+        @test FC.nttm(P, 0:7) == FC.nttm(P, collect(0:7))
+        @test NG.NTRUSolveFailure() isa NG.NTRUSolveFailure
+        v = view([7, 1, 2, 3, 4], Base.IdentityUnitRange(2:5)); w = view([9, 5, 6, 7, 8], Base.IdentityUnitRange(2:5))
+        @test FAL.poly_div_modq(v, [1, 0, 0, 0]) == [1, 2, 3, 4]
+        @test FAL.poly_mul_modq(v, w) == FAL.poly_mul_modq([1, 2, 3, 4], [5, 6, 7, 8])
+        @test FAL.is_invertible(v) == FAL.is_invertible([1, 2, 3, 4])
+        @test_throws ArgumentError FAL.negamul_int(v, w)
+        pk, skb = FAL.keypair(64; randombytes = R.det("degree"))
+        k = FAL.decode_sk(skb); sig = FAL.sign_poly(k, FAL.expand_sk(k).gs, msg)
+        @test FAL.verify_poly(k.h, 64, msg, sig)
+        @test !FAL.verify_poly([k.h; k.h], 64, msg, sig) && !FAL.verify_poly(k.h[1:32], 64, msg, sig)
+        FAL.wipe_sk!(k)
+        # A rejected compression leaves no partial encoding in the output buffer.
+        out = fill(0xff, 2)
+        @test FE.compress(fill(300, 4), 16, out) === nothing && all(iszero, out)
+        @test FE.compress([1, -2, 3], 32, fill(0xff, 4)) == FE.compress([1, -2, 3], 32)
+    end
+
+    # Signing and decoding wipes observed through recording methods in a child process: more
+    # specific methods that forward with `invoke`, so the test process keeps the package's own.
+    @testset "signing and decoding wipes (child process)" begin
+        spy = raw"""
+        using PQJulia
+        const FAL = PQJulia.FNDSA.Falcon; const FP = PQJulia.FNDSA.FalconFpr; const KEC = PQJulia.Keccak
+        det(tag) = (c = Ref(0); k -> (c[] += 1; KEC.shake256(Vector{UInt8}(string(tag, "/", c[])), UInt64(k))))
+        check(name, ok) = println("CHECK ", name, " ", ok)
+        const TGT = Any[]; const PRE = Any[]; const DEC = Any[]; const FFS = Any[]; const KZ = Any[]
+        FP.target(gs::FP.Setup, c::Vector{Int}) =
+            (t = invoke(FP.target, Tuple{FP.Setup, AbstractVector{<:Integer}}, gs, c); push!(TGT, t); t)
+        FP.preimage(gs::FP.Setup, c::Vector{Int}, t0, t1, σmin::Float64, r) =
+            (s = invoke(FP.preimage, Tuple{FP.Setup, AbstractVector{<:Integer}, Any, Any, Float64, Any}, gs, c, t0, t1, σmin, r); push!(PRE, s); s)
+        FAL.decode_signed(bytes::SubArray, n::Int, bits::Int) =
+            (s = invoke(FAL.decode_signed, NTuple{3, Any}, bytes, n, bits); push!(DEC, s); s)
+        FAL.ffsample(t0::Vector{ComplexF64}, t1::Vector{ComplexF64}, T, σmin::Float64, r) =
+            (z = invoke(FAL.ffsample, NTuple{5, Any}, t0, t1, T, σmin, r); push!(FFS, z); z)
+        FAL.klein_sample(B::Matrix{Float64}, Bgs, gsnorm2, target, σ, σmin, r) =
+            (z = invoke(FAL.klein_sample, NTuple{7, Any}, B, Bgs, gsnorm2, target, σ, σmin, r); push!(KZ, z); z)
+        nz(v) = any(x -> x != zero(x), v)
+        fprnz(v) = any(x -> x.re.b != 0 || x.im.b != 0, v)
+        function main()
+            msg = Vector{UInt8}("spy")
+            # Signing throws after the target is computed: t0, t1 are wiped.
+            pk, skb = FAL.keypair(64; randombytes = det("t64")); ek = FAL.expand_sk(skb)
+            r = try FAL.sign(msg, ek; randombytes = k -> k == FAL.SEED_LEN ? error("no seed") : zeros(UInt8, k)); "returned" catch e; string(typeof(e)) end
+            check("throw-after-target", r == "ErrorException" && !isempty(TGT))
+            check("throw-target-zero", !fprnz(TGT[end][1]) && !fprnz(TGT[end][2]))
+            # Degree 2 rejects often: every rejected (s0, s1) is wiped.
+            pk2, skb2 = FAL.keypair(2; randombytes = det("n2")); ek2 = FAL.expand_sk(skb2)
+            rej = 0; left = 0
+            for i in 1:200
+                empty!(PRE); FAL.sign(Vector{UInt8}("m$i"), ek2)
+                for (s0, s1) in PRE[1:end-1]; rej += 1; (nz(s0) || nz(s1)) && (left += 1); end
+            end
+            check("rejections-seen", rej > 0)
+            check("rejected-candidates-zero", left == 0)
+            # A key whose F field does not decode: the decoded f and g are wiped.
+            pk5, skb5 = FAL.keypair(512; randombytes = det("p512")); bad = copy(skb5); bad[end] = 0x80
+            empty!(DEC)
+            check("undecodable-rejected", FAL.decode_sk(bad) === nothing && length(DEC) == 3 && DEC[3] === nothing)
+            check("undecodable-fields-zero", !nz(DEC[1]) && !nz(DEC[2]))
+            # Float64 reference signer: every level's ffSampling output is wiped.
+            k64 = FAL.decode_sk(skb); gsf = FAL.sign_setup(k64)
+            empty!(FFS); sig = FAL.sign_poly(k64, gsf, msg; randombytes = det("f64"))
+            check("float-signer-verifies", FAL.verify_poly(k64.h, 64, msg, sig))
+            check("float-ffsample-zero", !isempty(FFS) && all(z -> !nz(z[1]) && !nz(z[2]), FFS))
+            # Klein reference signer: every lattice sample z is wiped.
+            pk16, skb16 = FAL.keypair(16; randombytes = det("k16")); k16 = FAL.decode_sk(skb16)
+            gk = FAL.sign_setup_klein(k16)
+            empty!(KZ); sigk = FAL.sign_poly_klein(k16, gk, msg; randombytes = det("kl"))
+            check("klein-verifies", FAL.verify_poly(k16.h, 16, msg, sigk))
+            check("klein-z-zero", !isempty(KZ) && all(z -> !nz(z), KZ))
+            println("DONE")
+        end
+        main()
+        """
+        dir = mktempdir()
+        try
+            script = joinpath(dir, "spy.jl"); write(script, spy)
+            proj = Base.active_project()
+            cmd = proj === nothing ? `$(Base.julia_cmd()) --startup-file=no $script` :
+                                     `$(Base.julia_cmd()) --startup-file=no --project=$proj $script`
+            err = IOBuffer()
+            out = read(pipeline(ignorestatus(cmd); stderr = err), String)
+            occursin("DONE", out) || println(stderr, "spy child output:\n", out, "\n", String(take!(err)))
+            got = Dict(String(t[2]) => t[3] == "true" for t in (split(l, ' ') for l in split(out, '\n')) if length(t) == 3 && t[1] == "CHECK")
+            for name in ("throw-after-target", "throw-target-zero", "rejections-seen", "rejected-candidates-zero",
+                         "undecodable-rejected", "undecodable-fields-zero", "float-signer-verifies",
+                         "float-ffsample-zero", "klein-verifies", "klein-z-zero")
+                @test (name => get(got, name, false)) == (name => true)
+            end
+        finally
+            rm(dir; recursive = true, force = true)
+        end
+    end
+
     if Sys.islinux() && isfile("/proc/self/mem")
         names, hits, results, done = R.run_child()
         @testset "child process ran every scenario" begin

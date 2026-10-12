@@ -28,6 +28,7 @@ intermediate value. Key generation catches only this exception and draws a new (
 struct NTRUSolveFailure <: Exception
     msg::String
 end
+NTRUSolveFailure() = NTRUSolveFailure("no NTRU solution for this (f, g)")
 Base.showerror(io::IO, e::NTRUSolveFailure) = print(io, "NTRUSolveFailure: ", e.msg)
 
 # Exact negacyclic multiply a·b mod (xⁿ+1) over ℤ: Karatsuba full product, then fold x^n = −1.

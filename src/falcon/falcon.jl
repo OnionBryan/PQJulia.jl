@@ -101,8 +101,8 @@ ntt_inv(A) = ntt_inv!([Int(mod(x, q)) for x in A])
 function ntt_modq(a)
     n = length(a); T = ntt_tables(n)
     â = Vector{Int}(undef, n)
-    @inbounds for i in 1:n
-        â[i] = Int(mod(Int(mod(a[i], q)) * T.ψpow[i], q))
+    for (i, x) in enumerate(a)                            # any axes: a is iterated, not indexed
+        @inbounds â[i] = Int(mod(Int(mod(x, q)) * T.ψpow[i], q))
     end
     ntt_table!(â, T.ωpow)
 end
@@ -148,6 +148,8 @@ end
 # f·G − g·F = q over ℤ[x]/(xⁿ+1), exact in Int64 for key-sized coefficients. The j range is split
 # at the wrap x^n = −1, so the inner loops have no branch (their bounds depend on indices only).
 function negamul_int(a, b)
+    Base.require_one_based_indexing(a, b)
+    length(a) == length(b) || throw(DimensionMismatch("polynomials of different degrees"))
     n = length(a); c = zeros(Int, n)
     @inbounds for i in 1:n
         ai = a[i]
@@ -554,7 +556,7 @@ end
 # ── Verify (math level) ─────────────────────────────────────────────────────
 function verify_poly(pk_h, n::Int, msg::AbstractVector{UInt8}, sig)
     p = params(n)
-    length(sig.s1) == n || return false
+    (length(sig.s1) == n && length(pk_h) == n) || return false
     c = hash_to_point(msg, sig.salt, n)
     s0 = centermod.(c .- poly_mul_modq(sig.s1, pk_h))   # s0 = c − s1·h mod q (centered)
     norm2 = sum(abs2, s0) + sum(abs2, sig.s1)

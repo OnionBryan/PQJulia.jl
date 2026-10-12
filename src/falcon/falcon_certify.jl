@@ -147,8 +147,8 @@ function ModRing(n, p)
 end
 # The coefficient halves and half-size transforms of each level are wiped (they come from the key).
 function nttm(R::ModRing, f::AbstractVector{Int})
-    length(f) == 1 && return [mod(f[1], R.p)]
-    e = f[1:2:end]; o = f[2:2:end]
+    length(f) == 1 && return [mod(first(f), R.p)]
+    e = [f[i] for i in firstindex(f):2:lastindex(f)]; o = [f[i] for i in firstindex(f)+1:2:lastindex(f)]
     F0 = nttm(R, e); F1 = nttm(R, o)
     F = mergem(R, F0, F1)
     wipe!(e, o, F0, F1)
