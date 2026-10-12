@@ -55,9 +55,16 @@ child process and cover the success paths, every rejection path and injected exc
 - Found by an adversarial review of the fixes above:
   - `catbytes` and the multi-buffer `wipe!` were written with a plain `xs...`, so Julia compiled
     them for a widened Vararg signature and every call on the ML-KEM keygen, ML-DSA signing and
-    X-Wing paths splatted through runtime dispatch, which JET does not report. Both specialize on
-    the argument count now; `test/specialization.jl` walks the compiled call graph of every
-    secret path and fails on any widened Vararg specialization.
+    X-Wing paths splatted through runtime dispatch, which JET does not report. Both are now
+    generated straight-line code for each argument list.
+  - Falcon signing, FALCON-MRM signing, keygen and key expansion passed their `randombytes` and
+    `leaf` function arguments on without specializing on them, so each signature called the
+    sampler and the encoder, and key expansion called `ffldl`, through runtime dispatch; they are
+    typed `::R where {R}` now. `FalconCertify.ModRing` boxed a variable captured by a closure.
+  - `test/specialization.jl` walks the compiled call graph of every secret path (into Base
+    higher-order functions that call package code) and fails on a widened Vararg specialization,
+    a dynamic call of a package function, a call through a value known only at run time, or a
+    walk that does not reach the function doing the work.
   - ML-DSA keygen wiped its seed expansion, s1, s2, NTT(s1), t and t0 only on success; it now
     wipes them, and the partial secret key, on every exit.
   - A Falcon secret key given as a non-`Vector` whose reads fail part-way (a key store) left a

@@ -17,6 +17,12 @@
         (SPY[] && push!(DEST, dest); invoke(copyto!, Tuple{AbstractArray, AbstractArray}, dest, src))
     FAL.decode_signed(bytes::SubArray{UInt8, 1, FailingKey}, n::Int, bits::Int) =
         (r = invoke(FAL.decode_signed, NTuple{3, Any}, bytes, n, bits); SPY[] && push!(DEC, r); r)
+    # Decoding from a plain Vector (the wrappers' copy): records f and g, and with INJECT set throws
+    # when F (8-bit fields) is reached, after f and g are decoded.
+    const INJECT = Ref(false); struct Injected <: Exception end
+    FAL.decode_signed(bytes::SubArray{UInt8, 1, Vector{UInt8}, Tuple{UnitRange{Int}}, true}, n::Int, bits::Int) =
+        (INJECT[] && bits == 8 && throw(Injected());
+         r = invoke(FAL.decode_signed, NTuple{3, Any}, bytes, n, bits); SPY[] && push!(DEC, r); r)
     Base.getindex(v::Vector{Tuple{Int, Int}}, r::UnitRange{Int}) =
         (c = invoke(getindex, Tuple{Array, AbstractUnitRange}, v, r); SPY[] && push!(SUB, c); c)
     zero_or_nothing(x) = x === nothing || all(iszero, x)
@@ -36,9 +42,19 @@
                 e = spied(() -> call(FailingKey(sk, lim, off)))
                 check("$tag-$name-threw", e isa ErrorException)
                 check("$tag-$name-no-copy", !isempty(DEST) && all(d -> all(iszero, d), DEST))
-                check("$tag-$name-no-field", all(zero_or_nothing, DEC))
             end
         end
+        # The copy succeeds and decoding fails after f and g: the copy, f and g are wiped.
+        INJECT[] = true
+        for (name, call) in calls
+            e = spied(() -> call(FailingKey(sk, length(sk), 10)))
+            check("inject-$name-threw", e isa Injected)
+            check("inject-$name-no-copy", length(DEST) == 1 && all(iszero, DEST[1]))
+            check("inject-$name-no-field", length(DEC) == 2 && all(d -> d !== nothing && all(iszero, d), DEC))
+        end
+        e = spied(() -> FAL.decode_sk(copy(sk)))
+        check("inject-decode_sk-no-field", e isa Injected && length(DEC) == 2 && all(d -> all(iszero, d), DEC))
+        INJECT[] = false
         # The math-level decoder on a 1-based key store: f and g are decoded, then reading F fails.
         e = spied(() -> FAL.decode_sk(FailingKey(sk, flen + 10, 0)))
         check("decode_sk-threw", e isa ErrorException && length(DEC) == 2)
@@ -66,9 +82,13 @@
         got = Dict(String(t[2]) => t[3] == "true" for t in (split(l, ' ') for l in split(out, '\n')) if length(t) == 3 && t[1] == "CHECK")
         @test occursin("DONE", out)
         names = String[]
-        for tag in ("offset", "onebased"), name in ("sign", "mrm_sign", "expand_sk", "certify"), what in ("threw", "no-copy", "no-field")
+        for tag in ("offset", "onebased"), name in ("sign", "mrm_sign", "expand_sk", "certify"), what in ("threw", "no-copy")
             push!(names, "$tag-$name-$what")
         end
+        for name in ("sign", "mrm_sign", "expand_sk", "certify"), what in ("threw", "no-copy", "no-field")
+            push!(names, "inject-$name-$what")
+        end
+        push!(names, "inject-decode_sk-no-field")
         append!(names, ["decode_sk-threw", "decode_sk-fields-zero", "shamir-int-correct", "shamir-int-no-copy"])
         for name in names
             @test (name => get(got, name, false)) == (name => true)

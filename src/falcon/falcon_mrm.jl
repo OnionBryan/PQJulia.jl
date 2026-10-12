@@ -38,7 +38,7 @@ H1(ρM1, M2, λ) = Falcon.hash_to_point(catbytes(pack14(ρM1), M2), TAG_H1, λ)
 H2(c1, k) = Falcon.hash_to_point(pack14(c1), TAG_H2, k)
 
 # ρ ← ℤ_q^γ uniformly: 16-bit draws below 5q, reduced mod q.
-function uniform_zq(k, randombytes)
+function uniform_zq(k, randombytes::R) where {R}
     out = Int[]
     while length(out) < k
         b = randombytes(2); x = (Int(b[1]) << 8) | b[2]
@@ -64,7 +64,7 @@ keystream, targets t0, t1 (which give f and F from the public c) and candidate (
 when the attempt ends: rejected, accepted or by an exception.
 """
 function sign(M1::AbstractVector{<:Integer}, M2::AbstractVector{UInt8}, ek::Falcon.ExpandedKey;
-              randombytes=Falcon.sysrandom)
+              randombytes::R=Falcon.sysrandom) where {R}
     n = ek.sk.n; (; λ, γ) = params(n); fp = Falcon.params(n); L = slen(n) * 8
     check_m1(M1, n)
     Falcon.check_leaves(ek.gs, fp.σmin)
@@ -89,7 +89,7 @@ end
 # One ffSampling attempt for the target c: header ‖ e1 ‖ e2, or `nothing` when the candidate is too
 # long or does not compress (sign then draws a new ρ). t0, t1, the candidate and its encodings are
 # wiped on every exit, including the rejections and an exception.
-function attempt(gs, c::Vector{Int}, n::Int, fp, L::Int, randombytes)
+function attempt(gs, c::Vector{Int}, n::Int, fp, L::Int, randombytes::R) where {R}
     t0, t1 = Falcon.target(gs, c)
     try
         s1, s2 = sample_preimage(gs, c, t0, t1, fp.σmin, randombytes)
@@ -111,7 +111,7 @@ end
 
 # ffSampling driven by ChaCha20 on a fresh 56-byte seed, as in Falcon.sign_poly; the seed is wiped
 # once the generator holds it, and the generator (state and keystream) once sampling ends or throws.
-function sample_preimage(gs, c, t0, t1, σmin, randombytes)
+function sample_preimage(gs, c, t0, t1, σmin, randombytes::R) where {R}
     seed = randombytes(Falcon.SEED_LEN)
     r = try CC.ChaCha20(seed) finally wipe!(seed) end
     try

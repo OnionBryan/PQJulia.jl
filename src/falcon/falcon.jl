@@ -245,7 +245,7 @@ const FXP_GS_LIMIT_206 = Int64(round((9999 // 10000 * 117 // 100)^2 * q * big(2)
 # The seed is wiped once it has keyed the ChaCha20 generator, and the generator (state and
 # keystream) when keygen returns or throws. Each candidate's plain-data arrays are wiped in
 # keygen_candidate; only the BigInt values of the NTRU solver are left (SECURITY.md).
-function keygen(n::Int; randombytes=sysrandom, maxtries=1000, certified=false, fips206=false, fixedpoint=false)
+function keygen(n::Int; randombytes::R=sysrandom, maxtries=1000, certified=false, fips206=false, fixedpoint=false) where {R}
     params(n)
     gsf = fips206 ? 0.9999 * 1.17 : 1.17
     seed = randombytes(SEED_LEN)
@@ -392,7 +392,7 @@ end
 
 # As sign_poly: the sampler seed and generator, the lattice coordinates z and every rejected
 # attempt are wiped.
-function sign_poly_klein(sk, gs, msg::AbstractVector{UInt8}; randombytes=sysrandom)
+function sign_poly_klein(sk, gs, msg::AbstractVector{UInt8}; randombytes::R=sysrandom) where {R}
     n = sk.n; p = params(n)
     salt = randombytes(SALT_LEN)
     c = hash_to_point(msg, salt, n)
@@ -516,7 +516,7 @@ check_leaves(gs::NamedTuple, σmin) = gs
 # Each attempt seeds a fresh ChaCha20 from `randombytes`, as the reference does. The target
 # (t0, t1), every attempt's seed and generator, and each rejected (s0, s1) are wiped, also when
 # signing throws.
-function sign_poly(sk, gs, msg::AbstractVector{UInt8}; randombytes=sysrandom)
+function sign_poly(sk, gs, msg::AbstractVector{UInt8}; randombytes::R=sysrandom) where {R}
     n = sk.n; p = params(n)
     check_leaves(gs, p.σmin)
     salt = randombytes(SALT_LEN)
@@ -543,7 +543,7 @@ end
 One ffSampling attempt with SamplerZ fed by a ChaCha20 generator seeded from
 `randombytes(SEED_LEN)`; the seed and the generator (state and keystream) are wiped on every exit.
 """
-function sample_preimage(gs, c, t0, t1, σmin, randombytes)
+function sample_preimage(gs, c, t0, t1, σmin, randombytes::R) where {R}
     seed = randombytes(SEED_LEN)
     r = try CC.ChaCha20(seed) catch; wipe!(seed); rethrow() end
     try
@@ -710,7 +710,7 @@ function wipe!(ek::ExpandedKey)
     ek
 end
 
-function keypair(n::Int; randombytes=sysrandom, certified=false, fips206=false, fixedpoint=false)
+function keypair(n::Int; randombytes::R=sysrandom, certified=false, fips206=false, fixedpoint=false) where {R}
     sk = keygen(n; randombytes, certified, fips206, fixedpoint)
     try
         return encode_pk(sk.h, n), encode_sk(sk)
@@ -721,7 +721,7 @@ end
 
 # The signing data built for one call (FFT basis and ffLDL tree) is wiped on every exit; the
 # caller's key is left as it is.
-function sign(msg::AbstractVector{UInt8}, sk::NamedTuple; randombytes=sysrandom)
+function sign(msg::AbstractVector{UInt8}, sk::NamedTuple; randombytes::R=sysrandom) where {R}
     ek = expand_sk(sk)
     try
         return sign(msg, ek; randombytes)
@@ -730,7 +730,7 @@ function sign(msg::AbstractVector{UInt8}, sk::NamedTuple; randombytes=sysrandom)
     end
 end
 # The key decoded and expanded for one call is wiped on every exit, also when signing throws.
-function sign(msg::AbstractVector{UInt8}, skb::AbstractVector{UInt8}; randombytes=sysrandom)
+function sign(msg::AbstractVector{UInt8}, skb::AbstractVector{UInt8}; randombytes::R=sysrandom) where {R}
     ek = expand_sk(skb)
     try
         return sign(msg, ek; randombytes)
@@ -738,7 +738,7 @@ function sign(msg::AbstractVector{UInt8}, skb::AbstractVector{UInt8}; randombyte
         wipe!(ek)
     end
 end
-function sign(msg::AbstractVector{UInt8}, ek::ExpandedKey; randombytes=sysrandom)
+function sign(msg::AbstractVector{UInt8}, ek::ExpandedKey; randombytes::R=sysrandom) where {R}
     encode_sig(sign_poly(ek.sk, ek.gs, msg; randombytes), ek.sk.n)
 end
 

@@ -132,6 +132,8 @@ function psi(n, p)                                               # primitive 2n-
     error("no 2n-th root mod $p")
 end
 
+powers(ψ::Int, m::Int, p::Int) = [powermod(ψ, 2k + 1, p) for k in 0:m-1]
+
 struct ModRing
     p::Int
     roots::Dict{Int,Vector{Int}}                                 # m ↦ [ψ_m^{2k+1}], ψ_m = ψ_n^{n/m}
@@ -140,7 +142,7 @@ end
 function ModRing(n, p)
     ψ = psi(n, p); r = Dict{Int,Vector{Int}}(); m = n; ψm = ψ
     while m >= 1
-        r[m] = [powermod(ψm, 2k + 1, p) for k in 0:m-1]
+        r[m] = powers(ψm, m, p)              # a function, not a closure over the reassigned ψm (boxed)
         m ÷= 2; ψm = mulmod(ψm, ψm, p)
     end
     ModRing(p, r, invmod(2, p))

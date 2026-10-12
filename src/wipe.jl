@@ -49,11 +49,12 @@ function wipe!(x::AbstractArray{T}) where {T}
 end
 wipe!(x) = throw(ArgumentError("wipe! zeroes arrays of plain data, got $(typeof(x))"))
 wipe!() = nothing
-# Vararg{Any, N} and a recursive helper: compiled for each argument list, so every buffer is wiped
-# through a static call. A plain `xs...` method is compiled for a widened Vararg{Any} signature,
-# and `foreach` over it dispatches at run time (which JET does not report).
-wipe!(a, b, xs::Vararg{Any, N}) where {N} = (wipe!(a); wipe!(b); wipe_each(xs...); nothing)
-@inline wipe_each() = nothing
-@inline wipe_each(x, xs::Vararg{Any, N}) where {N} = (wipe!(x); wipe_each(xs...))
+# Generated for each argument list, one static wipe! call per buffer and no tuple splat, at any
+# argument count. A plain `xs...` method is compiled for a widened Vararg{Any} signature, and
+# iterating it dispatches at run time (which JET does not report); a recursive splat does the same
+# beyond 32 arguments.
+@generated function wipe!(a, b, xs::Vararg{Any, N}) where {N}
+    Expr(:block, :(wipe!(a)), :(wipe!(b)), (:(wipe!(xs[$i])) for i in 1:N)..., :nothing)
+end
 
 end # module Wipe

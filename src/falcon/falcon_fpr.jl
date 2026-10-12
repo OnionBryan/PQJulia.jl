@@ -371,7 +371,7 @@ gram(a, b, c, d) = [cadd(cmul(a[i], cconj(c[i])), cmul(b[i], cconj(d[i]))) for i
 
 """Signing data for `sk`; refuses keys with an ffLDL leaf outside [σmin, σmax], and throws if
 the two evaluations of a leaf differ (a fault during expansion)."""
-function setup(sk, σ::Float64, σmin::Float64; leaf=leafsigma)
+function setup(sk, σ::Float64, σmin::Float64; leaf::L=leafsigma) where {L}
     pg, pf, pG, pF = fpr_of.(sk.g), neg.(fpr_of.(sk.f)), fpr_of.(sk.G), neg.(fpr_of.(sk.F))
     b00, b01, b10, b11 = fft(pg), fft(pf), fft(pG), fft(pF)
     wipe!(pg, pf, pG, pF)

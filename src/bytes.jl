@@ -9,8 +9,6 @@ export catbytes
 
 @inline nbytes(::UInt8) = 1
 @inline nbytes(x::AbstractVector{UInt8}) = length(x)
-@inline totalbytes() = 0
-@inline totalbytes(x, xs::Vararg{Any, N}) where {N} = nbytes(x) + totalbytes(xs...)
 
 @inline function put(r::Vector{UInt8}, o::Int, x::UInt8)
     @inbounds r[o+1] = x
@@ -21,17 +19,24 @@ end
     n == 0 || copyto!(r, o + 1, x, firstindex(x), n)
     o + n
 end
-@inline putall(r::Vector{UInt8}, o::Int) = r
-@inline putall(r::Vector{UInt8}, o::Int, x, xs::Vararg{Any, N}) where {N} = putall(r, put(r, o, x), xs...)
 
 """
     catbytes(xs...) -> Vector{UInt8}
 
 The concatenation of `xs`, each a `UInt8` or an `AbstractVector{UInt8}`, as a new `Vector{UInt8}`.
 """
-# Vararg{…, N}: compiled for each argument count. A plain `xs...` method is compiled for a widened
-# Vararg signature, and the call then splats through runtime dispatch (which JET does not report).
-catbytes(xs::Vararg{Union{UInt8, AbstractVector{UInt8}}, N}) where {N} =
-    putall(Vector{UInt8}(undef, totalbytes(xs...)), 0, xs...)
+# Generated for each argument list: straight-line code, no tuple splat at any argument count. A
+# plain `xs...` method is compiled for a widened Vararg signature, and its splats dispatch at run
+# time (which JET does not report); a recursive splat does the same beyond 32 arguments.
+@generated function catbytes(xs::Vararg{Union{UInt8, AbstractVector{UInt8}}, N}) where {N}
+    quote
+        n = 0
+        $((:(n += nbytes(xs[$i])) for i in 1:N)...)
+        r = Vector{UInt8}(undef, n)
+        o = 0
+        $((:(o = put(r, o, xs[$i])) for i in 1:N)...)
+        r
+    end
+end
 
 end # module Bytes
