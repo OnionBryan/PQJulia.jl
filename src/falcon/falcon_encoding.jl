@@ -8,17 +8,20 @@
 # ============================================================================
 module FalconEncoding
 
+import ...Wipe: wipe!
+
 export compress, decompress
 
 # s: integer signature coefficients. slen: target length in BITS. Returns a
-# Vector{UInt8} of slen÷8 bytes, or `nothing` if it overflows (caller resamples).
+# Vector{UInt8} of slen÷8 bytes, or `nothing` if it overflows (caller resamples; the
+# partial encoding of the rejected attempt is zeroed).
 # Bits are written MSB-first straight into the output bytes; bit p (1-based) is the
 # (8 - (p-1)%8)-th bit of byte ⌈p/8⌉.
 function compress(s::AbstractVector{<:Integer}, slen::Int)
     out = zeros(UInt8, slen ÷ 8); nbits = 8 * length(out); p = 0
     for si in s
         a = abs(Int(si))
-        p + 9 + (a >> 7) > slen && return nothing             # sign, 7 low bits, unary, terminator
+        p + 9 + (a >> 7) > slen && (wipe!(out); return nothing)  # sign, 7 low bits, unary, terminator
         si < 0 && _setbit!(out, p + 1, nbits)
         for j in 6:-1:0
             (a >> j) & 1 == 1 && _setbit!(out, p + 8 - j, nbits)

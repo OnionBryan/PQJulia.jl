@@ -16,8 +16,12 @@
 module FalconFFT
 
 using LinearAlgebra
+import ...Wipe: wipe!
 
 const q = 12 * 1024 + 1   # 12289
+
+# Zero a temporary of plain data; arrays of other element types (BigInt) are left alone.
+scrub!(x::AbstractArray{T}) where {T} = isbitstype(T) ? wipe!(x) : x
 
 # ── Coefficient-domain helpers (common.py) ──────────────────────────────────
 split(f) = (f[1:2:end], f[2:2:end])                       # (even, odd) coeffs
@@ -48,15 +52,23 @@ const ROOT_TABLE = [rootsof(1 << k) for k in 0:10]
 roots(n) = ispow2(n) && n <= 1024 ? ROOT_TABLE[trailing_zeros(n) + 1] : rootsof(n)
 
 # fft(f) = merge_fft(fft(f_even), fft(f_odd)): O(n log n), each root used once per level.
+# Keygen and the Float64 signer run these on secret polynomials, so the coefficient halves and
+# the half-size transforms of every level are zeroed before returning.
 function fft(f::AbstractVector)
     length(f) == 1 && return ComplexF64[f[1]]
     f0, f1 = split(f)
-    merge_fft(fft(f0), fft(f1))
+    a, b = fft(f0), fft(f1)
+    F = merge_fft(a, b)
+    scrub!(f0); scrub!(f1); wipe!(a, b)
+    F
 end
 function ifft(F::AbstractVector)
     length(F) == 1 && return ComplexF64[F[1]]
     F0, F1 = split_fft(F)
-    merge(ifft(F0), ifft(F1))
+    a, b = ifft(F0), ifft(F1)
+    f = merge(a, b)
+    wipe!(F0, F1, a, b)
+    f
 end
 
 # FFT-domain arithmetic (all pointwise).

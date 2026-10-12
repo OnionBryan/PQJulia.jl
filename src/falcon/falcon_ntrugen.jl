@@ -14,14 +14,31 @@
 module FalconNTRUGen
 
 import ..FalconFFT as FF
+import ...Wipe: wipe!
 
 const q = 12289
 
+"""
+    NTRUSolveFailure()
+
+Thrown by `ntru_solve` when f·G − g·F = q has no solution for the given (f, g) (the resultants of
+f and g with xⁿ+1 are not coprime), or when the fixed-point solver cannot represent an
+intermediate value. Key generation catches only this exception and draws a new (f, g).
+"""
+struct NTRUSolveFailure <: Exception
+    msg::String
+end
+Base.showerror(io::IO, e::NTRUSolveFailure) = print(io, "NTRUSolveFailure: ", e.msg)
+
 # Exact negacyclic multiply a·b mod (xⁿ+1) over ℤ: Karatsuba full product, then fold x^n = −1.
-# When |a_i|·|b_j|·n < 2^126 the product is computed exactly in Int128 instead.
+# When |a_i|·|b_j|·n < 2^126 the product is computed exactly in Int128 instead. The BigInt
+# values cannot be wiped (SECURITY.md); the Int128 scratch is.
 function negamul(a::AbstractVector, b::AbstractVector)
     n = length(a)
-    maxbits(a) + maxbits(b) + ndigits(n, base=2) <= 126 && return BigInt.(negamul_i128(a, b))
+    if maxbits(a) + maxbits(b) + ndigits(n, base=2) <= 126
+        c = negamul_i128(a, b); r = BigInt.(c); wipe!(c)
+        return r
+    end
     n < 32 && return negamul_school(a, b)
     ab = karamul(BigInt.(a), BigInt.(b))
     [ab[i] - ab[i+n] for i in 1:n]
@@ -34,6 +51,7 @@ function negamul_i128(a::AbstractVector, b::AbstractVector)
         for j in 1:n-i+1; c[i+j-1] += ai * B[j]; end
         for j in n-i+2:n; c[i+j-1-n] -= ai * B[j]; end
     end
+    wipe!(A, B)
     c
 end
 
@@ -100,13 +118,13 @@ function xgcd(a::Integer, b::Integer)
     return old_r, old_s, old_t      # g, u, v
 end
 
-# Solve f·G − g·F = q recursively. Returns (F,G) or throws if the base gcd ≠ 1
+# Solve f·G − g·F = q recursively. Returns (F,G), or throws NTRUSolveFailure if the base gcd ≠ 1
 # (resultants not coprime ⇒ caller resamples f,g).
 function ntru_solve(f, g)
     n = length(f)
     if n == 1
         d, u, v = xgcd(f[1], g[1])
-        d == 1 || throw(ErrorException("non-coprime resultants"))
+        d == 1 || throw(NTRUSolveFailure("non-coprime resultants"))
         return BigInt[-q*v], BigInt[q*u]
     end
     fp = field_norm(f); gp = field_norm(g)
@@ -119,20 +137,32 @@ end
 # Babai reduce: (F,G) −= k·(f,g), k = round((F f̄ + G ḡ)/(f f̄ + g ḡ)) in FFT on the top
 # 53 bits, repeated until (F,G) is within 8 bits of (f,g). Preserves f·G − g·F = q.
 maxbits(v) = maximum(x -> (x == 0 ? 0 : ndigits(abs(x), base=2)), v)
+# The Float64 arrays (scaled f, g, F, G, their FFTs and the quotient) are wiped on every exit.
 function reduce!(f, g, F, G)
     fb = max(maxbits(f), maxbits(g))
     shf = max(fb - 53, 0)
-    ff = FF.fft(Float64.(f .>> shf)); gf = FF.fft(Float64.(g .>> shf))
-    den = ff .* conj.(ff) .+ gf .* conj.(gf)
-    while true
-        sz = max(maxbits(F), maxbits(G))
-        sz <= fb + 8 && break
-        sh = max(sz - 53, 0)
-        Ff = FF.fft(Float64.(F .>> sh)); Gf = FF.fft(Float64.(G .>> sh))
-        k = round.(BigInt, real.(FF.ifft((Ff .* conj.(ff) .+ Gf .* conj.(gf)) ./ den)))
-        all(iszero, k) && break
-        s = sh - shf                               # (k << s)·f = (k·f) << s
-        F .-= negamul(k, f) .<< s; G .-= negamul(k, g) .<< s
+    fd = Float64.(f .>> shf); gd = Float64.(g .>> shf)
+    ff = ComplexF64[]; gf = ComplexF64[]; den = ComplexF64[]
+    Fd = Float64[]; Gd = Float64[]; Ff = ComplexF64[]; Gf = ComplexF64[]; kq = ComplexF64[]; kc = ComplexF64[]
+    try
+        ff = FF.fft(fd); gf = FF.fft(gd)
+        den = ff .* conj.(ff) .+ gf .* conj.(gf)
+        while true
+            sz = max(maxbits(F), maxbits(G))
+            sz <= fb + 8 && break
+            sh = max(sz - 53, 0)
+            Fd = Float64.(F .>> sh); Gd = Float64.(G .>> sh)
+            Ff = FF.fft(Fd); Gf = FF.fft(Gd)
+            kq = (Ff .* conj.(ff) .+ Gf .* conj.(gf)) ./ den
+            kc = FF.ifft(kq)
+            k = round.(BigInt, real.(kc))
+            wipe!(Fd, Gd, Ff, Gf, kq, kc)
+            all(iszero, k) && break
+            s = sh - shf                               # (k << s)·f = (k·f) << s
+            F .-= negamul(k, f) .<< s; G .-= negamul(k, g) .<< s
+        end
+    finally
+        wipe!(fd, gd, ff, gf, den, Fd, Gd, Ff, Gf, kq, kc)
     end
     F, G
 end
