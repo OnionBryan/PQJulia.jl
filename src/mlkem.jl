@@ -11,6 +11,7 @@ module MLKEM
 using SHA
 using Random
 using ..Wipe: wipe!
+using ..Bytes: catbytes
 import ..Keccak
 
 # Shared primitives — same for all security levels
@@ -63,7 +64,7 @@ for (category, params) in CATEGORY_PARAMS
     import ..MLKEM: kyber_cbd2!, kyber_cbd3!
     import ..MLKEM: kyber_verify, kyber_cmov!
     import ...Keccak
-    import ..MLKEM: derived_sizes, wipe!
+    import ..MLKEM: derived_sizes, wipe!, catbytes
 
     using Random
 

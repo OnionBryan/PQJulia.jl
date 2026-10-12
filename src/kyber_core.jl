@@ -213,12 +213,14 @@ end
 # ── PRF / XOF / Hash Wrappers ──────────────────────────────────────────────
 # SHAKE-128, SHAKE-256, SHA3-256 and SHA3-512 from Keccak (keccak.jl).
 
-"""PRF: SHAKE-256(seed || nonce, outlen)"""
+"""PRF: SHAKE-256(seed || nonce, outlen). The seed is secret (σ or r): the input copy is wiped."""
 function kyber_prf(seed::Vector{UInt8}, nonce::UInt8, outlen::Int)
-    inp = vcat(seed, UInt8[nonce])
-    out = Keccak.shake256(inp, UInt64(outlen))
-    wipe!(inp)
-    return out
+    inp = catbytes(seed, nonce)
+    try
+        return Keccak.shake256(inp, UInt64(outlen))
+    finally
+        wipe!(inp)
+    end
 end
 
 """XOF: SHAKE-128(seed, outlen)"""
@@ -227,12 +229,12 @@ function kyber_xof(seed::Vector{UInt8}, outlen::Int)
 end
 
 """Hash H: SHA3-256"""
-function kyber_hash_h(data::Vector{UInt8})
+function kyber_hash_h(data::AbstractVector{UInt8})
     return Keccak.sha3_256(data)
 end
 
 """Hash G: SHA3-512"""
-function kyber_hash_g(data::Vector{UInt8})
+function kyber_hash_g(data::AbstractVector{UInt8})
     return Keccak.sha3_512(data)
 end
 
@@ -277,7 +279,7 @@ function kyber_sample_uniform!(r::Vector{Int16}, seed::Vector{UInt8},
                                i::UInt8, j::UInt8)
     # SHAKE-128 rejection sampling with re-squeeze (C ref: indcpa.c:gen_matrix)
     # SHAKE128_RATE = 168; initial buffer = 4 blocks = 672 bytes
-    xof_input = vcat(seed, UInt8[i, j])
+    xof_input = catbytes(seed, i, j)       # ρ ‖ i ‖ j: public, nothing to wipe
     total_out = 168 * 4  # 672 bytes
     buf = kyber_xof(xof_input, total_out)
     ctr = kyber_rej_uniform!(r, buf)
@@ -488,15 +490,16 @@ Coefficients are mapped to positive standard representatives first.
 Mirrors poly.c:poly_tobytes.
 """
 function kyber_poly_tobytes!(r::AbstractVector{UInt8}, a::Vector{Int16})
-    checkbounds(a, 1:KYBER_N); checkbounds(r, 1:KYBER_POLYBYTES)
+    o = firstindex(r) - 1
+    checkbounds(a, 1:KYBER_N); checkbounds(r, o + 1:o + KYBER_POLYBYTES)
     @inbounds for i in 0:(KYBER_N ÷ 2 - 1)
         # Map to positive standard representatives
         # Use `% UInt16` to match C's silent int16_t → uint16_t conversion
         t0 = caddq(a[2i + 1]) % UInt16
         t1 = caddq(a[2i + 2]) % UInt16
-        r[3i + 1] = (t0) % UInt8
-        r[3i + 2] = ((t0 >> 8) | (t1 << 4)) % UInt8
-        r[3i + 3] = (t1 >> 4) % UInt8
+        r[o + 3i + 1] = (t0) % UInt8
+        r[o + 3i + 2] = ((t0 >> 8) | (t1 << 4)) % UInt8
+        r[o + 3i + 3] = (t1 >> 4) % UInt8
     end
     return r
 end
@@ -508,10 +511,11 @@ Deserialize polynomial from bytes: 384 bytes → 256 coefficients (12 bits each)
 Mirrors poly.c:poly_frombytes.
 """
 function kyber_poly_frombytes!(r::Vector{Int16}, a::AbstractVector{UInt8})
-    checkbounds(r, 1:KYBER_N); checkbounds(a, 1:KYBER_POLYBYTES)
+    o = firstindex(a) - 1
+    checkbounds(r, 1:KYBER_N); checkbounds(a, o + 1:o + KYBER_POLYBYTES)
     @inbounds for i in 0:(KYBER_N ÷ 2 - 1)
-        r[2i + 1] = ((UInt16(a[3i + 1]) | (UInt16(a[3i + 2]) << 8)) & 0x0FFF) % Int16
-        r[2i + 2] = (((UInt16(a[3i + 2]) >> 4) | (UInt16(a[3i + 3]) << 4)) & 0x0FFF) % Int16
+        r[2i + 1] = ((UInt16(a[o + 3i + 1]) | (UInt16(a[o + 3i + 2]) << 8)) & 0x0FFF) % Int16
+        r[2i + 2] = (((UInt16(a[o + 3i + 2]) >> 4) | (UInt16(a[o + 3i + 3]) << 4)) & 0x0FFF) % Int16
     end
     return r
 end
@@ -627,9 +631,11 @@ Sample noise polynomial with eta=2 from PRF(seed, nonce).
 """
 function kyber_poly_getnoise_eta2!(r::Vector{Int16}, seed::Vector{UInt8}, nonce::UInt8)
     buf = kyber_prf(seed, nonce, 2 * KYBER_N ÷ 4)   # eta2*N/4 = 128 bytes
-    kyber_cbd2!(r, buf)
-    wipe!(buf)
-    return r
+    try
+        return kyber_cbd2!(r, buf)
+    finally
+        wipe!(buf)
+    end
 end
 
 """
@@ -640,16 +646,13 @@ eta1=2 or eta1=3 depending on Kyber parameter set.
 """
 function kyber_poly_getnoise_eta1!(r::Vector{Int16}, seed::Vector{UInt8},
                                    nonce::UInt8, eta1::Int)
+    (eta1 == 2 || eta1 == 3) || error("eta1 must be 2 or 3, got $eta1")   # before any secret exists
     buf = kyber_prf(seed, nonce, eta1 * KYBER_N ÷ 4)
-    if eta1 == 2
-        kyber_cbd2!(r, buf)
-    elseif eta1 == 3
-        kyber_cbd3!(r, buf)
-    else
-        error("eta1 must be 2 or 3, got $eta1")
+    try
+        return eta1 == 2 ? kyber_cbd2!(r, buf) : kyber_cbd3!(r, buf)
+    finally
+        wipe!(buf)
     end
-    wipe!(buf)
-    return r
 end
 
 # ══════════════════════════════════════════════════════════════════════════════

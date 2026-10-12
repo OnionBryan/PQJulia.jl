@@ -6,12 +6,14 @@ BigInt transcription of RFC 7748 §5 (`x25519_ref`), cross-checked in the tests.
 module X25519
 
 using Random
+using ..Wipe: wipe!
+using ..Bytes: catbytes
 
 export x25519, x25519_base, x25519_keypair
 
 const P = big(2)^255 - 19
 const A24 = 121665
-const BASE = vcat(UInt8(9), zeros(UInt8, 31))
+const BASE = catbytes(UInt8(9), zeros(UInt8, 31))
 const M51 = (UInt64(1) << 51) - 1
 const LOW63 = 0x7fffffffffffffff
 
@@ -96,10 +98,16 @@ function fe_tobytes(a::Fe)
     out
 end
 
+# Word i (0-based) of 32 little-endian bytes, indexed from firstindex(b): any axes work.
+@inline function le_word(b::AbstractVector{UInt8}, i::Int)
+    o = firstindex(b) + 8i
+    reduce(|, UInt64(b[o+j]) << (8j) for j in 0:7)
+end
+
 # Little-endian 32 bytes; the top bit is masked (RFC 7748 §5); values in [p, 2²⁵⁵) are accepted.
 function fe_frombytes(b::AbstractVector{UInt8})
-    w = [reduce(|, UInt64(b[8i+j+1]) << (8j) for j in 0:7) for i in 0:3]
-    w[4] &= 0x7fffffffffffffff
+    checkbounds(b, firstindex(b):firstindex(b) + 31)
+    w = (le_word(b, 0), le_word(b, 1), le_word(b, 2), le_word(b, 3) & 0x7fffffffffffffff)
     (w[1] & M51, ((w[1] >> 51) | (w[2] << 13)) & M51, ((w[2] >> 38) | (w[3] << 26)) & M51,
      ((w[3] >> 25) | (w[4] << 39)) & M51, w[4] >> 12)
 end
@@ -110,14 +118,17 @@ cswap(s::UInt64, a::Fe, b::Fe) = (m = -s; d = ntuple(i -> m & (a[i] ⊻ b[i]), 5
 
 # decodeScalar25519 (RFC 7748 §5) as four little-endian 64-bit words.
 function clamp_words(k::AbstractVector{UInt8})
-    w = ntuple(i -> reduce(|, UInt64(k[8(i-1)+j+1]) << (8j) for j in 0:7), 4)
+    checkbounds(k, firstindex(k):firstindex(k) + 31)
+    w = (le_word(k, 0), le_word(k, 1), le_word(k, 2), le_word(k, 3))
     (w[1] & ~UInt64(7), w[2], w[3], (w[4] & 0x7fffffffffffffff) | 0x4000000000000000)
 end
 
 # decodeScalar25519 (RFC 7748 §5).
 function clamp_scalar(k::AbstractVector{UInt8})
     kb = collect(k); kb[1] &= 0xf8; kb[32] &= 0x7f; kb[32] |= 0x40
-    sum(big(kb[i+1]) << (8i) for i in 0:31)
+    s = sum(big(kb[i+1]) << (8i) for i in 0:31)
+    wipe!(kb)
+    s
 end
 
 check32(v, what) = length(v) == 32 || throw(ArgumentError("X25519 $what must be 32 bytes"))

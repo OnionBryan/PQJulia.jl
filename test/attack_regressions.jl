@@ -214,7 +214,7 @@ for (category, params) in PQJulia.MLDSA.CATEGORY_PARAMS
     import PQJulia.MLDSA: Q, N, D, ZETAS, montgomery_reduce, reduce32, caddq, freeze, ntt!,
                           poly_pointwise!, poly_pointwise_acc!, poly_add!, poly_sub!, poly_reduce!,
                           poly_caddq!, poly_shiftl!, poly_chknorm, poly_uniform!, power2round,
-                          derived_sizes, wipe!
+                          derived_sizes, wipe!, catbytes
     import PQJulia, PQJulia.Keccak, SHA
     using Random
     import ..MAXIN

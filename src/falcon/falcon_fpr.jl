@@ -371,7 +371,7 @@ gram(a, b, c, d) = [cadd(cmul(a[i], cconj(c[i])), cmul(b[i], cconj(d[i]))) for i
 
 """Signing data for `sk`; refuses keys with an ffLDL leaf outside [σmin, σmax], and throws if
 the two evaluations of a leaf differ (a fault during expansion)."""
-function setup(sk, σ::Float64, σmin::Float64; leaf=leafsigma)
+function setup(sk, σ::Float64, σmin::Float64; leaf::L=leafsigma) where {L}
     pg, pf, pG, pF = fpr_of.(sk.g), neg.(fpr_of.(sk.f)), fpr_of.(sk.G), neg.(fpr_of.(sk.F))
     b00, b01, b10, b11 = fft(pg), fft(pf), fft(pG), fft(pF)
     wipe!(pg, pf, pG, pF)
@@ -388,6 +388,10 @@ function setup(sk, σ::Float64, σmin::Float64; leaf=leafsigma)
     Setup(b00, b01, b10, b11, T)
 end
 wipe!(gs::Setup) = (wipe!(gs.b00, gs.b01, gs.b10, gs.b11); wipe!(gs.T); gs)
+# Secret material: printing shows the degree only.
+Base.show(io::IO, gs::Setup) = print(io, "FalconFpr.Setup(n = ", length(gs.b00), ", <secret>)")
+Base.show(io::IO, ::Leaf) = print(io, "FalconFpr.Leaf(<secret>)")
+Base.show(io::IO, T::Node) = print(io, "FalconFpr.Node(n = ", length(T.l10), ", <secret>)")
 
 # Before each signature: the leaves of an expanded key may have changed since setup (memory
 # corruption, a fault, or a wiped key, whose zero leaves would make signing loop forever).

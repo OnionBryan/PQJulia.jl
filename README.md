@@ -79,9 +79,15 @@ measurably faster on its own on both the Apple M5 and an Intel i7, even through 
 
 `julia test/timing/dispatch.jl` (runs in CI; installs [JET](https://github.com/aviatesk/JET.jl)
 into a temporary environment) checks key generation, encapsulation, decapsulation and signing for
-ML-KEM and ML-DSA at every level, Falcon key expansion, X25519 and X-Wing for runtime dispatch. A
-boxed or type-unstable value on secret data makes timing depend on the value, which is how the
-X25519 encoding leaked; JET finds it without timing noise.
+ML-KEM and ML-DSA at every level, Falcon key expansion, signing and FALCON-MRM signing, X25519 and
+X-Wing for runtime dispatch. A boxed or type-unstable value on secret data makes timing depend on
+the value, which is how the X25519 encoding leaked; JET finds it without timing noise. Byte strings
+are joined with `catbytes` (src/bytes.jl): on Julia 1.12.1, `Base.vcat` of byte vectors builds its
+assertion message through runtime dispatch, which the check reports on every path that calls it.
+JET analyses each call with its concrete argument types, so it does not see a method written
+`f(xs...)` that Julia compiles for a widened Vararg signature and calls through dynamic dispatch;
+`test/specialization.jl` (part of the test suite) walks the compiled call graph of the same paths
+and fails on any such specialization.
 
 ### Falcon signing
 

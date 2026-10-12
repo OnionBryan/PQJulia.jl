@@ -15,6 +15,7 @@
 module FalconCertify
 
 import ..FalconNTRUGen as NG
+import ...Wipe: wipe!
 
 const q = 12289
 
@@ -131,6 +132,8 @@ function psi(n, p)                                               # primitive 2n-
     error("no 2n-th root mod $p")
 end
 
+powers(ψ::Int, m::Int, p::Int) = [powermod(ψ, 2k + 1, p) for k in 0:m-1]
+
 struct ModRing
     p::Int
     roots::Dict{Int,Vector{Int}}                                 # m ↦ [ψ_m^{2k+1}], ψ_m = ψ_n^{n/m}
@@ -139,14 +142,19 @@ end
 function ModRing(n, p)
     ψ = psi(n, p); r = Dict{Int,Vector{Int}}(); m = n; ψm = ψ
     while m >= 1
-        r[m] = [powermod(ψm, 2k + 1, p) for k in 0:m-1]
+        r[m] = powers(ψm, m, p)              # a function, not a closure over the reassigned ψm (boxed)
         m ÷= 2; ψm = mulmod(ψm, ψm, p)
     end
     ModRing(p, r, invmod(2, p))
 end
+# The coefficient halves and half-size transforms of each level are wiped (they come from the key).
 function nttm(R::ModRing, f::AbstractVector{Int})
-    length(f) == 1 && return [mod(f[1], R.p)]
-    F0 = nttm(R, f[1:2:end]); F1 = nttm(R, f[2:2:end]); mergem(R, F0, F1)
+    length(f) == 1 && return [mod(first(f), R.p)]
+    e = [f[i] for i in firstindex(f):2:lastindex(f)]; o = [f[i] for i in firstindex(f)+1:2:lastindex(f)]
+    F0 = nttm(R, e); F1 = nttm(R, o)
+    F = mergem(R, F0, F1)
+    wipe!(e, o, F0, F1)
+    F
 end
 function mergem(R::ModRing, F0, F1)
     h = length(F0); ζ = R.roots[2h]; p = R.p; F = Vector{Int}(undef, 2h)
@@ -167,7 +175,8 @@ function splitm(R::ModRing, F)
 end
 adjm(F) = reverse(F)                                             # f(ζ_k⁻¹) = F[n−1−k]
 
-# Returns false if some pivot vanishes mod p (that prime is skipped).
+# Returns false if some pivot vanishes mod p (that prime is skipped). The pointwise LDL scratch
+# (inverses, l10, d11 and the split halves) is wiped.
 function ffldl_mod!(out, R::ModRing, g00, g01, g11)
     p = R.p; n = length(g00)
     any(iszero, g00) && return false
@@ -176,24 +185,34 @@ function ffldl_mod!(out, R::ModRing, g00, g01, g11)
     l10 = [mulmod(a01[k], inv00[k], p) for k in 1:n]
     al10 = adjm(l10)
     d11 = [mod(g11[k] - mulmod(mulmod(l10[k], al10[k], p), g00[k], p), p) for k in 1:n]
+    wipe!(inv00, a01, l10, al10)
     if n > 2
         a0, a1 = splitm(R, g00); b0, b1 = splitm(R, d11)
-        ffldl_mod!(out, R, a0, a1, a0) || return false
-        return ffldl_mod!(out, R, b0, b1, b0)
+        wipe!(d11)
+        ok = ffldl_mod!(out, R, a0, a1, a0) && ffldl_mod!(out, R, b0, b1, b0)
+        wipe!(a0, a1, b0, b1)
+        return ok
     end
     push!(out, mulmod(g00[1] + g00[2], R.inv2, p), mulmod(d11[1] + d11[2], R.inv2, p))
+    wipe!(d11)
     true
 end
 
+# Leaves mod p. The Int copies of f, g, F, G, their transforms mod p and the Gram matrix are wiped.
 function leaves_mod(f, g, F, G, p)
     n = length(f); R = ModRing(n, p)
-    b00, b01, b10, b11 = nttm(R, Int.(g)), nttm(R, -Int.(f)), nttm(R, Int.(G)), nttm(R, -Int.(F))
-    ad(v) = adjm(v)
-    g00 = mod.(Int.(Int128.(b00) .* ad(b00) .% p .+ Int128.(b01) .* ad(b01) .% p), p)
-    g01 = mod.(Int.(Int128.(b00) .* ad(b10) .% p .+ Int128.(b01) .* ad(b11) .% p), p)
-    g11 = mod.(Int.(Int128.(b10) .* ad(b10) .% p .+ Int128.(b11) .* ad(b11) .% p), p)
-    out = Int[]
-    ffldl_mod!(out, R, g00, g01, g11) ? out : nothing
+    ig, mf, iG, mF = Int.(g), .-Int.(f), Int.(G), .-Int.(F)
+    b00, b01, b10, b11 = nttm(R, ig), nttm(R, mf), nttm(R, iG), nttm(R, mF)
+    wipe!(ig, mf, iG, mF)
+    a00, a01, a10, a11 = adjm(b00), adjm(b01), adjm(b10), adjm(b11)
+    g00 = mod.(Int.(Int128.(b00) .* a00 .% p .+ Int128.(b01) .* a01 .% p), p)
+    g01 = mod.(Int.(Int128.(b00) .* a10 .% p .+ Int128.(b01) .* a11 .% p), p)
+    g11 = mod.(Int.(Int128.(b10) .* a10 .% p .+ Int128.(b11) .* a11 .% p), p)
+    wipe!(b00, b01, b10, b11, a00, a01, a10, a11)
+    out = sizehint!(Int[], n)                                    # n leaves: no regrowth copies
+    ok = ffldl_mod!(out, R, g00, g01, g11)
+    wipe!(g00, g01, g11)
+    ok ? out : (wipe!(out); nothing)
 end
 
 # Rational reconstruction: the unique a/b ≡ r (mod M) with |a|, b ≤ N, N = ⌊√(M/2)⌋.
@@ -214,18 +233,22 @@ function exact_leaves(f, g, F, G)
     logH = n * (log2(sum(abs2, big.(f)) + sum(abs2, big.(g))) + log2(sum(abs2, big.(F)) + sum(abs2, big.(G))))
     ps = ntt_primes(n, 2logH + 8)
     res = Vector{Vector{Int}}(); used = Int[]
-    for p in ps
-        v = leaves_mod(f, g, F, G, p)
-        v === nothing && continue
-        push!(res, v); push!(used, p)
+    try
+        for p in ps
+            v = leaves_mod(f, g, F, G, p)
+            v === nothing && continue
+            push!(res, v); push!(used, p)
+        end
+        while sum(log2, used) < 2logH + 2                             # replace skipped primes
+            p = ntt_primes(n, sum(log2, ps) + 40)[end]; push!(ps, p)
+            v = leaves_mod(f, g, F, G, p); v === nothing || (push!(res, v); push!(used, p))
+        end
+        M = prod(big.(used)); N = isqrt(M ÷ 2)
+        w = [(M ÷ p) * invmod(M ÷ p, big(p)) for p in used]          # CRT idempotents
+        return [ratrecon(mod(sum(w[j] * res[j][i] for j in eachindex(used)), M), M, N) for i in eachindex(res[1])]
+    finally
+        wipe!(res)                                                    # the leaves mod each prime
     end
-    while sum(log2, used) < 2logH + 2                             # replace skipped primes
-        p = ntt_primes(n, sum(log2, ps) + 40)[end]; push!(ps, p)
-        v = leaves_mod(f, g, F, G, p); v === nothing || (push!(res, v); push!(used, p))
-    end
-    M = prod(big.(used)); N = isqrt(M ÷ 2)
-    w = [(M ÷ p) * invmod(M ÷ p, big(p)) for p in used]          # CRT idempotents
-    [ratrecon(mod(sum(w[j] * res[j][i] for j in eachindex(used)), M), M, N) for i in eachindex(res[1])]
 end
 
 "Exact squared Gram–Schmidt norm max(‖(g,−f)‖², q²‖(ḡ, f̄)/(ff̄+gḡ)‖²) (ntrugen.py gs_norm)."

@@ -3,6 +3,7 @@ module FalconFxp
 
 import ..FalconSampler as FS
 import ..FalconNTRUGen as NG
+import ...Wipe: wipe!
 
 const q = 12289
 
@@ -88,7 +89,12 @@ function vect_mul_fft!(a, b)
     end
     a
 end
-vect_adj_fft!(a) = (hn = length(a) >> 1; a[hn+1:end] .= .-a[hn+1:end]; a)
+# In place: no copy of the (secret) imaginary half.
+function vect_adj_fft!(a)
+    hn = length(a) >> 1
+    @inbounds for u in hn+1:length(a); a[u] = -a[u]; end
+    a
+end
 function vect_mul_autoadj_fft!(a, b)
     hn = length(a) >> 1
     for u in 1:hn; a[u] = fxr_mul(a[u], b[u]); a[u+hn] = fxr_mul(a[u+hn], b[u]); end
@@ -100,8 +106,15 @@ function vect_invnorm_fft(a, b, e)
     [fxr_div(fxr_of(1 << e), fxr_sqr(a[u]) + fxr_sqr(a[u+hn]) + fxr_sqr(b[u]) + fxr_sqr(b[u+hn])) for u in 1:hn]
 end
 
-# v·2³²/2^sh rounded to nearest, for BigInt or small integer coefficients.
-to_fxr(v, sh) = Int64(div(big(v) << 32 + (big(1) << sh >> 1), big(1) << sh, RoundDown))
+# v·2³²/2^sh rounded to nearest, for BigInt or small integer coefficients. A value outside the
+# fxr (Int64) range means this solver cannot reduce (F, G) for the current (f, g): that is a solver
+# failure (NTRUSolveFailure), after which keygen draws a new (f, g). It happens for a large share
+# of fixed-point candidates at n = 512, 1024.
+function to_fxr(v, sh)
+    x = div(big(v) << 32 + (big(1) << sh >> 1), big(1) << sh, RoundDown)
+    typemin(Int64) <= x <= typemax(Int64) || throw(NG.NTRUSolveFailure("fixed-point value out of range"))
+    Int64(x)
+end
 
 # ── (f, g) sampling (ng_gauss.c, ng_falcon.c tables) ─────────────────────────
 const GAUSS_256 = UInt16[24,
@@ -116,7 +129,8 @@ const GAUSS_1024 = UInt16[12,
     2, 8, 28, 94, 280, 742, 1761, 3753, 7197, 12472, 19623, 28206, 37329, 45912, 53063, 58338,
     61782, 63774, 64793, 65255, 65441, 65507, 65527, 65533]
 
-# prng_buffer: 16-bit little-endian draws from 512-byte chunks of the RNG.
+# prng_buffer: 16-bit little-endian draws from 512-byte chunks of the RNG. Each chunk is a copy of
+# keystream that determines the key: it is zeroed when replaced, and the last one by the owner.
 mutable struct U16Source
     rng::Any
     buf::Vector{UInt8}
@@ -125,6 +139,7 @@ end
 U16Source(rng) = U16Source(rng, UInt8[], 512)
 function next_u16(s::U16Source)
     if s.ptr > 510
+        wipe!(s.buf)
         s.buf = FS.randbytes(s.rng, 512); s.ptr = 0
     end
     x = UInt32(s.buf[s.ptr+1]) | UInt32(s.buf[s.ptr+2]) << 8; s.ptr += 2
@@ -134,23 +149,33 @@ end
 # One table draw: −kmax + #{k : tab[k] < x}.
 tabdraw(tab, x) = -Int(tab[1]) + count(k -> tab[k] < x, 2:2*tab[1]+1)
 
-"gauss_sample_poly / gauss_sample_poly_reduced: n coefficients, resampled until their sum is odd."
+"""gauss_sample_poly / gauss_sample_poly_reduced: n coefficients, resampled until their sum is odd.
+The result is built at full size and refilled in place on a resample; the keystream chunks are
+wiped on every exit, and the result too if sampling throws."""
 function gauss_sample_poly(n::Int, rng)
     logn = trailing_zeros(n)
     2 <= logn <= 10 || throw(ArgumentError("fixed-point keygen supports n = 4..1024"))
     src = U16Source(rng)
     tab = logn == 10 ? GAUSS_1024 : logn == 9 ? GAUSS_512 : GAUSS_256
-    while true
-        f = Int[]
-        if logn >= 8
-            for _ in 1:n; push!(f, tabdraw(tab, next_u16(src))); end
-        else
-            while length(f) < n
-                y = sum(tabdraw(tab, next_u16(src)) for _ in 1:1 << (8 - logn))
-                -127 <= y <= 127 && push!(f, y)
+    f = zeros(Int, n)
+    try
+        while true
+            if logn >= 8
+                for i in 1:n; f[i] = tabdraw(tab, next_u16(src)); end
+            else
+                i = 0
+                while i < n
+                    y = sum(tabdraw(tab, next_u16(src)) for _ in 1:1 << (8 - logn))
+                    -127 <= y <= 127 && (i += 1; f[i] = y)
+                end
             end
+            isodd(sum(f)) && return f
         end
-        isodd(sum(f)) && return f
+    catch
+        wipe!(f)
+        rethrow()
+    finally
+        wipe!(src.buf)
     end
 end
 
@@ -159,14 +184,19 @@ end
 const GS_LIMIT = Int64(72251709809335)
 function gs_ok(f, g; limit::Int64 = GS_LIMIT)
     sum(abs2, f) + sum(abs2, g) < 16823 || return false
-    rt1 = vect_FFT!(fxr_of.(f)); rt2 = vect_FFT!(fxr_of.(g))
-    rt3 = vect_invnorm_fft(rt1, rt2, 0)
-    vect_adj_fft!(rt1); vect_adj_fft!(rt2)
-    rt1 .= fxr_mul.(rt1, fxr_of(q)); rt2 .= fxr_mul.(rt2, fxr_of(q))
-    vect_mul_autoadj_fft!(rt1, rt3); vect_mul_autoadj_fft!(rt2, rt3)
-    vect_iFFT!(rt1); vect_iFFT!(rt2)
-    sn = sum(fxr_sqr(rt1[u]) + fxr_sqr(rt2[u]) for u in eachindex(rt1))
-    sn < limit
+    rt1 = fxr_of.(f); rt2 = fxr_of.(g); rt3 = Int64[]
+    try
+        vect_FFT!(rt1); vect_FFT!(rt2)
+        rt3 = vect_invnorm_fft(rt1, rt2, 0)
+        vect_adj_fft!(rt1); vect_adj_fft!(rt2)
+        rt1 .= fxr_mul.(rt1, fxr_of(q)); rt2 .= fxr_mul.(rt2, fxr_of(q))
+        vect_mul_autoadj_fft!(rt1, rt3); vect_mul_autoadj_fft!(rt2, rt3)
+        vect_iFFT!(rt1); vect_iFFT!(rt2)
+        sn = sum(fxr_sqr(rt1[u]) + fxr_sqr(rt2[u]) for u in eachindex(rt1))
+        return sn < limit
+    finally
+        wipe!(rt1, rt2, rt3)
+    end
 end
 
 # ── Babai reduction in fixed point (ePrint 2023/290 §2) ──────────────────────
@@ -182,30 +212,37 @@ function reduce!(f, g, F, G)
     R = logn <= 8 ? 10 : 18 - logn                                    # reduce_bits, SOLVE_Falcon_* profiles
     fb = max(NG.maxbits(f), NG.maxbits(g))
     sf = max(fb - e, 0)
-    rf = vect_FFT!(to_fxr.(f, sf)); rg = vect_FFT!(to_fxr.(g, sf))
-    d = vect_invnorm_fft(rf, rg, e)
-    vect_adj_fft!(rf); vect_adj_fft!(rg)
-    vect_mul_autoadj_fft!(rf, d); vect_mul_autoadj_fft!(rg, d)          # 2^e·f*/(ff*+gg*), 2^e·g*/(…)
-    # Scaled steps while they shrink (F, G); then unscaled steps until k = 0 or no progress.
-    last = typemax(Int); last0 = typemax(Int); unscaled = false
-    while true
-        sz = max(NG.maxbits(F), NG.maxbits(G))
-        unscaled |= sz >= last
-        u = unscaled ? 0 : max(sz - fb - R, 0)
-        if u == 0
-            sz >= last0 && break
-            last0 = sz
+    # The fixed-point arrays derived from (f, g, F, G) are wiped on every exit.
+    rf = Int64[]; rg = Int64[]; d = Int64[]; rF = Int64[]; rG = Int64[]; rk = Int64[]
+    try
+        rf = vect_FFT!(to_fxr.(f, sf)); rg = vect_FFT!(to_fxr.(g, sf))
+        d = vect_invnorm_fft(rf, rg, e)
+        vect_adj_fft!(rf); vect_adj_fft!(rg)
+        vect_mul_autoadj_fft!(rf, d); vect_mul_autoadj_fft!(rg, d)          # 2^e·f*/(ff*+gg*), 2^e·g*/(…)
+        # Scaled steps while they shrink (F, G); then unscaled steps until k = 0 or no progress.
+        last = typemax(Int); last0 = typemax(Int); unscaled = false
+        while true
+            sz = max(NG.maxbits(F), NG.maxbits(G))
+            unscaled |= sz >= last
+            u = unscaled ? 0 : max(sz - fb - R, 0)
+            if u == 0
+                sz >= last0 && break
+                last0 = sz
+            end
+            last = sz
+            rF = vect_FFT!(to_fxr.(F, sf + u)); rG = vect_FFT!(to_fxr.(G, sf + u))
+            vect_mul_fft!(rF, rf); vect_mul_fft!(rG, rg)
+            rk = vect_iFFT!(rF .+ rG)
+            k = BigInt[fxr_round(fxr_div2e(x, e)) for x in rk]
+            wipe!(rF, rG, rk)
+            if all(iszero, k)
+                u == 0 && break
+                unscaled = true; continue
+            end
+            F .-= NG.negamul(k, f) .<< u; G .-= NG.negamul(k, g) .<< u
         end
-        last = sz
-        rF = vect_FFT!(to_fxr.(F, sf + u)); rG = vect_FFT!(to_fxr.(G, sf + u))
-        vect_mul_fft!(rF, rf); vect_mul_fft!(rG, rg)
-        rk = vect_iFFT!(rF .+ rG)
-        k = BigInt[fxr_round(fxr_div2e(x, e)) for x in rk]
-        if all(iszero, k)
-            u == 0 && break
-            unscaled = true; continue
-        end
-        F .-= NG.negamul(k, f) .<< u; G .-= NG.negamul(k, g) .<< u
+    finally
+        wipe!(rf, rg, d, rF, rG, rk)
     end
     F, G
 end

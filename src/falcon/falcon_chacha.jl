@@ -92,6 +92,8 @@ function randu72(r::ChaCha20)
     u
 end
 
+Base.show(io::IO, ::ChaCha20) = print(io, "FalconChaCha.ChaCha20(<secret state>)")
+
 wipe!(r::ChaCha20) = (r.s = ntuple(_ -> UInt32(0), Val(14)); r.ctr = 0; wipe!(r.buf); r)
 
 end # module

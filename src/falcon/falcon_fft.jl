@@ -16,11 +16,17 @@
 module FalconFFT
 
 using LinearAlgebra
+import ...Wipe: wipe!
 
 const q = 12 * 1024 + 1   # 12289
 
+# Zero a temporary of plain data; arrays of other element types (BigInt) are left alone.
+scrub!(x::AbstractArray{T}) where {T} = isbitstype(T) ? wipe!(x) : x
+
 # ── Coefficient-domain helpers (common.py) ──────────────────────────────────
-split(f) = (f[1:2:end], f[2:2:end])                       # (even, odd) coeffs
+# (even, odd) coeffs as fresh Vectors, whatever f is (a range, a view, other axes): one copy each,
+# which fft wipes.
+split(f) = ([f[i] for i in firstindex(f):2:lastindex(f)], [f[i] for i in firstindex(f)+1:2:lastindex(f)])
 function merge(f0, f1)
     n = 2 * length(f0); f = Vector{eltype(f0)}(undef, n)
     @inbounds for i in 1:length(f0); f[2i-1] = f0[i]; f[2i] = f1[i]; end
@@ -41,19 +47,30 @@ end
 
 # ── Complex FFT over R[x]/(xⁿ+1) ────────────────────────────────────────────
 # ζ_k, the n roots of xⁿ+1; (2k+1)/n is exact for n a power of 2, so cispi rounds each root once.
-const ROOTS = Dict{Int,Vector{ComplexF64}}()
-roots(n) = get!(() -> ComplexF64[cispi((2k + 1) / n) for k in 0:n-1], ROOTS, n)
+# A table built at load for n = 1, 2, …, 1024 rather than a Dict filled on demand: concurrent
+# calls from several threads only read it. Other n are computed on each call.
+rootsof(n) = ComplexF64[cispi((2k + 1) / n) for k in 0:n-1]
+const ROOT_TABLE = [rootsof(1 << k) for k in 0:10]
+roots(n) = ispow2(n) && n <= 1024 ? ROOT_TABLE[trailing_zeros(n) + 1] : rootsof(n)
 
 # fft(f) = merge_fft(fft(f_even), fft(f_odd)): O(n log n), each root used once per level.
+# Keygen and the Float64 signer run these on secret polynomials, so the coefficient halves and
+# the half-size transforms of every level are zeroed before returning.
 function fft(f::AbstractVector)
-    length(f) == 1 && return ComplexF64[f[1]]
+    length(f) == 1 && return ComplexF64[first(f)]
     f0, f1 = split(f)
-    merge_fft(fft(f0), fft(f1))
+    a, b = fft(f0), fft(f1)
+    F = merge_fft(a, b)
+    scrub!(f0); scrub!(f1); wipe!(a, b)
+    F
 end
 function ifft(F::AbstractVector)
-    length(F) == 1 && return ComplexF64[F[1]]
+    length(F) == 1 && return ComplexF64[first(F)]
     F0, F1 = split_fft(F)
-    merge(ifft(F0), ifft(F1))
+    a, b = ifft(F0), ifft(F1)
+    f = merge(a, b)
+    wipe!(F0, F1, a, b)
+    f
 end
 
 # FFT-domain arithmetic (all pointwise).

@@ -21,6 +21,17 @@ using PQJulia
                   1024 => ("b7a17ccc8fa58fc12d8f9ab18ab3249164f259555de8b8bd526fea0bbd00c56b",
                            "310cd575e8ef152eb81876423dc032d3ec1f237dc336eb6e1a1bc942db5000c2"))
 
+    @testset "secret-holding types print no secret data" begin
+        sk = katkey(512); ek = FAL.expand_sk(sk)
+        for x in (ek, ek.gs, ek.gs.T, leaflist(ek.gs.T)[1], FAL.sign_setup(sk).T,
+                  PQJulia.FNDSA.FalconChaCha.ChaCha20(collect(UInt8, 1:56)))
+            for s in (repr(x), repr(MIME"text/plain"(), x), string(x))
+                @test length(s) < 80 && occursin("secret", s)
+            end
+        end
+        @test repr(ek) == "Falcon.ExpandedKey(n = 512, <secret>)"
+    end
+
     @testset "leaf range test at the bounds" begin
         σmin = FAL.params(512).σmin
         bad(v) = FP.leafbad(FP.Leaf(FP.fpr(v)), FP.fpr(σmin), FP.fpr(σmax))

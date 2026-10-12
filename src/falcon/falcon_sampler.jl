@@ -10,6 +10,8 @@ module FalconSampler
 
 using Random
 import ...Keccak
+import ...Bytes: catbytes
+import ...Wipe: wipe!
 import ..FalconChaCha
 
 export RNG, KATSource, randbytes, samplerz, MAX_SIGMA
@@ -45,9 +47,14 @@ mutable struct RNG
 end
 RNG(seed::Vector{UInt8}) = RNG(copy(seed), UInt64(0), UInt8[], 1)
 RNG() = RNG(rand(RandomDevice(), UInt8, 32))
+# The hash input holds the seed and the replaced block is keystream: both are zeroed.
 function _refill!(r::RNG)
     ctrbytes = reinterpret(UInt8, [r.ctr]); r.ctr += 1
-    r.buf = Keccak.shake256(vcat(r.seed, ctrbytes), UInt64(512)); r.pos = 1
+    inp = catbytes(r.seed, ctrbytes)
+    wipe!(r.buf)
+    r.buf = Keccak.shake256(inp, UInt64(512)); r.pos = 1
+    wipe!(inp)
+    r
 end
 function randbytes(r::RNG, k::Int)
     out = Vector{UInt8}(undef, k)
@@ -57,17 +64,19 @@ function randbytes(r::RNG, k::Int)
     end
     out
 end
+wipe!(r::RNG) = (wipe!(r.seed); wipe!(r.buf); r.ctr = 0; r.pos = 1; r)
 
 randbytes(r::FalconChaCha.ChaCha20, k::Int) = FalconChaCha.randbytes(r, k)
 
 # randbytes(r, 1)[1], and the little-endian value of randbytes(r, 9): the same stream positions;
-# the ChaCha20 methods read the keystream buffer in place.
+# the ChaCha20 methods read the keystream buffer in place, the others wipe their copy.
 randbyte(r::FalconChaCha.ChaCha20) = FalconChaCha.randbyte(r)
-randbyte(r) = randbytes(r, 1)[1]
+randbyte(r) = (b = randbytes(r, 1); v = b[1]; wipe!(b); v)
 randu72(r::FalconChaCha.ChaCha20) = FalconChaCha.randu72(r)
 function randu72(r)
     bytes = randbytes(r, 9)
     u = UInt128(0); for i in 1:9; u |= UInt128(bytes[i]) << (8 * (i - 1)); end
+    wipe!(bytes)
     u
 end
 

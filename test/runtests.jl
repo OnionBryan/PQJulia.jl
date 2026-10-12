@@ -147,6 +147,16 @@ end
     @test Cat.dilithium_verify(m, Cat.dilithium_sign_derand(m, sk, zeros(UInt8, 32)), pk)
 end
 
+@testset "ML-DSA invalid input raises ArgumentError" begin
+    Cat = MLDSA.Category3
+    pk, sk = Cat.dilithium_keygen_derand(zeros(UInt8, 32)); msg = UInt8[1, 2, 3]
+    @test_throws ArgumentError Cat.dilithium_sign(msg, sk[1:end-1])
+    @test_throws ArgumentError Cat.dilithium_sign(msg, sk; context=zeros(UInt8, 256))
+    @test_throws ArgumentError Cat.dilithium_sign_derand(msg, sk, zeros(UInt8, 31))
+    @test_throws ArgumentError Cat.dilithium_sign_internal_mu(zeros(UInt8, 63), sk, zeros(UInt8, 32))
+    @test_throws ArgumentError Cat.dilithium_sign_prehash(msg, sk, "MD5")
+end
+
 # ==================== FN-DSA (Falcon) ====================
 
 include("falcon_kat.jl")
@@ -155,13 +165,19 @@ include("falcon_mrm.jl")
 include("falcon_fxp.jl")
 include("falcon_fpr.jl")
 include("falcon_hardening.jl")
+include("regressions_falcon.jl")
+include("regressions_falcon_mrm.jl")
 include("vectors_extra.jl")
 
 # ==================== X25519 and X-Wing ====================
 
 include("x25519_xwing.jl")
+include("regressions_mlkem_xwing.jl")
 include("attack_regressions.jl")
 include("wipe.jl")
+include("regressions_mldsa.jl")
+include("regressions_review.jl")
+include("specialization.jl")
 
 @testset "FN-DSA API ($(M.IDENTIFIER))" for M in (FNDSA.Falcon512, FNDSA.Falcon1024)
     pk, sk = M.falcon_keygen()
@@ -208,10 +224,60 @@ end
         secret_bytes = rand(UInt8, 32)
         shares = shamir_share_bytes(secret_bytes, 3, 5)
         @test shamir_reconstruct_bytes(shares, 3, 32) == secret_bytes
+        # The output has exactly nbytes bytes, leading zero bytes included.
+        for lead in (0, 1, 15, 31)
+            s = vcat(zeros(UInt8, lead), rand(0x01:0xff, 1), rand(UInt8, 31 - lead))
+            r = shamir_reconstruct_bytes(shamir_share_bytes(s, 2, 3), 2, 32)
+            @test length(r) == 32 && r == s
+        end
+        @test shamir_reconstruct_bytes(shamir_share_bytes(zeros(UInt8, 32), 2, 3), 2, 32) == zeros(UInt8, 32)
+        # A secret longer than nbytes is an error instead of a wrong-length result. Shamir sharing has no
+        # integrity: a share altered by δ shifts the secret by λ·δ mod p (λ = 1 for share 3 of 1:3), so
+        # only alterations that leave the nbytes range are detected.
+        @test_throws ArgumentError shamir_reconstruct_bytes(shares, 3, 16)
+        @test_throws ArgumentError shamir_reconstruct_bytes(shares, 3, 0)
+        bad = [shares[1], shares[2], (shares[3][1], mod(shares[3][2] + big(2)^300, PQJulia.PRIME_P))]
+        @test_throws ArgumentError shamir_reconstruct_bytes(bad, 3, 32)
     end
     @testset "Duplicate x-coordinates rejected" begin
         shares = shamir_share(big(123), 3, 5)
         @test_throws ArgumentError shamir_reconstruct([shares[1], shares[2], shares[1]], 3)
+        # x and x + p are the same field point
+        @test_throws ArgumentError shamir_reconstruct([(1, big(3)), (14, big(3))], 2, 13)
+    end
+    @testset "Invalid thresholds, moduli and secrets rejected" begin
+        shares = shamir_share(big(12345), 2, 3)
+        for k in (0, -1)
+            @test_throws ArgumentError shamir_reconstruct(shares, k)
+            @test_throws ArgumentError shamir_reconstruct_bytes(shamir_share_bytes(rand(UInt8, 32), 2, 3), k, 32)
+        end
+        @test_throws ArgumentError shamir_share_bytes(UInt8[], 3, 5)
+        @test_throws ArgumentError shamir_share(7, 3, 13, 13)          # x = 13 ≡ 0 would be the secret
+        @test_throws ArgumentError shamir_share(7, 3, 14, 13)
+        for p in (12, 1, 0, -7, big(2)^521 - 3)                        # not prime
+            @test_throws ArgumentError shamir_share(0, 1, 1, p)
+        end
+        @test_throws ArgumentError shamir_reconstruct([(1, big(7)), (2, big(9))], 2, 12)
+        @test_throws ArgumentError shamir_share_bytes(fill(0xff, 66), 2, 3)   # >= p
+        sh = shamir_share(7, 3, 12, 13)                                # a small prime field works
+        @test shamir_reconstruct(sh[[2, 5, 12]], 3, 13) == 7
+    end
+    @testset "x-coordinates far apart (no Int overflow)" begin
+        P = PQJulia.PRIME_P; s = big(424242); a = big(987654321)
+        f(x) = mod(s + a * big(x), P)
+        @test shamir_reconstruct([(x, f(x)) for x in [typemax(Int), -2]], 2) == s
+        @test shamir_reconstruct([(x, f(x)) for x in [typemin(Int), 1]], 2) == s
+        @test shamir_reconstruct([(x, f(x)) for x in [5, -7]], 2) == s
+    end
+    @testset "Byte round trip, every length" begin
+        for len in 1:65, (k, n) in ((1, 1), (2, 3), (3, 5))
+            sec = rand(UInt8, len); sec[1] = rand((0x00, sec[1]))
+            sh = shamir_share_bytes(sec, k, n)
+            @test shamir_reconstruct_bytes(sh[end-k+1:end], k, len) == sec
+            @test shamir_reconstruct_bytes(sh, k, len + 3) == vcat(zeros(UInt8, 3), sec)
+        end
+        # The secret goes into one BigInt without a hex String copy.
+        @test !occursin("bytes2hex", read(joinpath(pkgdir(PQJulia), "src", "shamir.jl"), String))
     end
 end
 

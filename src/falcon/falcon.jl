@@ -19,6 +19,7 @@ import ..FalconCertify as FC
 import ..FalconFxp as FX
 import ..FalconFpr as FP
 import ...Wipe: wipe!
+import ...Bytes: catbytes
 import ...Keccak
 
 const q = 12289
@@ -91,12 +92,33 @@ function ntt_fwd(a)
     â = [Int(mod(a[i] * T.ψpow[i], q)) for i in 1:n]
     ntt_table!(â, T.ωpow)
 end
-function ntt_inv(A)
-    n = length(A); T = ntt_tables(n)
-    C = ntt_table!([Int(mod(x, q)) for x in A], T.ωinv)
-    [Int(mod(C[i] * T.ψinv[i], q)) for i in 1:n]
+ntt_inv(A) = ntt_inv!([Int(mod(x, q)) for x in A])
+
+# The helpers below run on secret polynomials (key decoding, keygen): ntt_modq reduces mod q while
+# weighting, so no mod-q copy is made, the inverse transform runs in place, and every transform of
+# an operand is wiped before returning. Outputs equal the ntt_fwd(mod.(a, q)) / ntt_inv forms.
+"NTT of `a mod q` in a fresh array (the caller wipes it when `a` is secret)."
+function ntt_modq(a)
+    n = length(a); T = ntt_tables(n)
+    â = Vector{Int}(undef, n)
+    for (i, x) in enumerate(a)                            # any axes: a is iterated, not indexed
+        @inbounds â[i] = Int(mod(Int(mod(x, q)) * T.ψpow[i], q))
+    end
+    ntt_table!(â, T.ωpow)
 end
-is_invertible(f) = all(!=(0), ntt_fwd(mod.(f, q)))
+"Inverse NTT of `A` (entries in [0, q)) in place."
+function ntt_inv!(A::Vector{Int})
+    n = length(A); T = ntt_tables(n)
+    ntt_table!(A, T.ωinv)
+    @inbounds for i in 1:n; A[i] = Int(mod(A[i] * T.ψinv[i], q)); end
+    A
+end
+function is_invertible(f)
+    F = ntt_modq(f); z = false
+    @inbounds for x in F; z |= x == 0; end
+    wipe!(F)
+    !z
+end
 # x^(q−2) mod q: fixed public exponent, constant modulus, no Euclid on secret data.
 function invq(x::Int)
     r = 1
@@ -106,38 +128,75 @@ function invq(x::Int)
     end
     r
 end
-poly_div_modq(a, b) = (A = ntt_fwd(mod.(a, q)); B = ntt_fwd(mod.(b, q));
-                       ntt_inv([mod(A[i] * invq(B[i]), q) for i in 1:length(A)]))
+# a/b and a·b in ℤ_q[x]/(xⁿ+1). The result is a fresh array; the transform of b is wiped and that
+# of a becomes the result.
+function poly_div_modq(a, b)
+    length(a) == length(b) || throw(DimensionMismatch("polynomials of different degrees"))
+    A = ntt_modq(a); B = ntt_modq(b)
+    @inbounds for i in eachindex(A); A[i] = mod(A[i] * invq(B[i]), q); end
+    wipe!(B)
+    ntt_inv!(A)
+end
+function poly_mul_modq(a, b)
+    length(a) == length(b) || throw(DimensionMismatch("polynomials of different degrees"))
+    A = ntt_modq(a); B = ntt_modq(b)
+    @inbounds for i in eachindex(A); A[i] = mod(A[i] * B[i], q); end
+    wipe!(B)
+    ntt_inv!(A)
+end
 
-# f·G − g·F = q over ℤ[x]/(xⁿ+1), exact in Int64 for key-sized coefficients.
+# f·G − g·F = q over ℤ[x]/(xⁿ+1), exact in Int64 for key-sized coefficients. The j range is split
+# at the wrap x^n = −1, so the inner loops have no branch (their bounds depend on indices only).
 function negamul_int(a, b)
+    Base.require_one_based_indexing(a, b)
+    length(a) == length(b) || throw(DimensionMismatch("polynomials of different degrees"))
     n = length(a); c = zeros(Int, n)
-    @inbounds for i in 1:n, j in 1:n
-        k = i + j - 1
-        if k <= n; c[k] += a[i] * b[j]; else; c[k-n] -= a[i] * b[j]; end   # branch on indices only
+    @inbounds for i in 1:n
+        ai = a[i]
+        for j in 1:n-i+1; c[i+j-1] += ai * b[j]; end
+        for j in n-i+2:n; c[i+j-1-n] -= ai * b[j]; end
     end
     c
 end
-ntru_check_int(f, g, F, G) = (d = negamul_int(f, G) .- negamul_int(g, F); ok = d == [q; zeros(Int, length(f) - 1)]; wipe!(d); ok)
-poly_mul_modq(a, b) = (A = ntt_fwd(mod.(a, q)); B = ntt_fwd(mod.(b, q));
-                       ntt_inv([mod(A[i] * B[i], q) for i in 1:length(A)]))
+# Both products are wiped; the comparison with (q, 0, …, 0) accumulates without branching.
+function ntru_check_int(f, g, F, G)
+    d = negamul_int(f, G); e = negamul_int(g, F)
+    acc = 0
+    @inbounds for i in eachindex(d)
+        acc |= (d[i] - e[i]) ⊻ ifelse(i == 1, q, 0)
+    end
+    wipe!(d, e)
+    acc == 0
+end
 
 # ── Babai reduce: shrink (F,G) keeping f·G − g·F = q (FFT, bitsize-scaled) ───
 maxbits(v) = maximum(x -> (x == 0 ? 0 : ndigits(abs(x), base=2)), v)
+# The Float64 arrays (f, g, F, G scaled, their FFTs, the quotient and k) are wiped on every exit;
+# the BigInt values cannot be (SECURITY.md).
 function reduce_FG!(f, g, F, G)
-    ff = FF.fft(Float64.(f)); gf = FF.fft(Float64.(g))
-    den = real.(ff .* conj.(ff) .+ gf .* conj.(gf))
-    while true
-        sz = max(maxbits(F), maxbits(G)); base = max(maxbits(f), maxbits(g))
-        sz <= base + 8 && break
-        sh = sz - 52
-        Fs = Float64.(F .>> sh); Gs = Float64.(G .>> sh)
-        Ff = FF.fft(Fs); Gf = FF.fft(Gs)
-        kf = (Ff .* conj.(ff) .+ Gf .* conj.(gf)) ./ den
-        k = round.(Int, real.(FF.ifft(kf)))
-        all(==(0), k) && break
-        kb = BigInt.(k) .<< sh
-        F .= F .- NG.negamul(kb, f); G .= G .- NG.negamul(kb, g)
+    fd = Float64.(f); gd = Float64.(g)
+    ff = ComplexF64[]; gf = ComplexF64[]; den = Float64[]
+    Fs = Float64[]; Gs = Float64[]; Ff = ComplexF64[]; Gf = ComplexF64[]; kf = ComplexF64[]; kc = ComplexF64[]; k = Int[]
+    try
+        ff = FF.fft(fd); gf = FF.fft(gd)
+        den = real.(ff .* conj.(ff) .+ gf .* conj.(gf))
+        while true
+            sz = max(maxbits(F), maxbits(G)); base = max(maxbits(f), maxbits(g))
+            sz <= base + 8 && break
+            sh = sz - 52
+            Fs = Float64.(F .>> sh); Gs = Float64.(G .>> sh)
+            Ff = FF.fft(Fs); Gf = FF.fft(Gs)
+            kf = (Ff .* conj.(ff) .+ Gf .* conj.(gf)) ./ den
+            kc = FF.ifft(kf)
+            k = round.(Int, real.(kc))
+            wipe!(Fs, Gs, Ff, Gf, kf, kc)
+            all(==(0), k) && break
+            kb = BigInt.(k) .<< sh
+            wipe!(k)
+            F .= F .- NG.negamul(kb, f); G .= G .- NG.negamul(kb, g)
+        end
+    finally
+        wipe!(fd, gd, ff, gf, den, Fs, Gs, Ff, Gf, kf, kc, k)
     end
     F, G
 end
@@ -145,19 +204,35 @@ end
 # ── Key generation (spec Alg. 5 NTRUGen; tprest ntrugen.py) ─────────────────
 const SIGMA_FG = 1.43300980528773                  # 1.17·√(q/8192)
 
-# f ~ D_{ℤⁿ, σ_fg}: sum of 4096/n SamplerZ(0, 1.17√(q/8192)) draws per coefficient.
+# f ~ D_{ℤⁿ, σ_fg}: sum of 4096/n SamplerZ(0, 1.17√(q/8192)) draws per coefficient. The raw
+# draws are wiped on every exit.
 function gen_poly(n, rng)
-    f0 = [FS.samplerz(0.0, SIGMA_FG, SIGMA_FG - 0.001, rng) for _ in 1:4096]
-    k = 4096 ÷ n
-    [sum(@view f0[(i-1)*k+1:i*k]) for i in 1:n]
+    f0 = zeros(Int, 4096)
+    try
+        for j in 1:4096; f0[j] = FS.samplerz(0.0, SIGMA_FG, SIGMA_FG - 0.001, rng); end
+        k = 4096 ÷ n
+        return [sum(@view f0[(i-1)*k+1:i*k]) for i in 1:n]
+    finally
+        wipe!(f0)
+    end
 end
 
 # Squared Gram–Schmidt norm of [[g, −f], [G, −F]]: max(‖(f,g)‖², q²‖(ḡ, f̄)/(ff̄+gḡ)‖²).
+# Every Float64 array derived from f and g is wiped on every exit.
 function gs_norm2(f, g)
-    ff = FF.fft(Float64.(f)); gf = FF.fft(Float64.(g))
-    ffgg = ff .* conj.(ff) .+ gf .* conj.(gf)
-    Ft = real.(FF.ifft(conj.(gf) ./ ffgg)); Gt = real.(FF.ifft(conj.(ff) ./ ffgg))
-    max(sum(abs2, f) + sum(abs2, g), q^2 * (sum(abs2, Ft) + sum(abs2, Gt)))
+    fd = Float64.(f); gd = Float64.(g)
+    ff = ComplexF64[]; gf = ComplexF64[]; ffgg = ComplexF64[]; tf = ComplexF64[]; tg = ComplexF64[]
+    cf = ComplexF64[]; cg = ComplexF64[]; Ft = Float64[]; Gt = Float64[]
+    try
+        ff = FF.fft(fd); gf = FF.fft(gd)
+        ffgg = ff .* conj.(ff) .+ gf .* conj.(gf)
+        tf = conj.(gf) ./ ffgg; tg = conj.(ff) ./ ffgg
+        cf = FF.ifft(tf); cg = FF.ifft(tg)
+        Ft = real.(cf); Gt = real.(cg)
+        return max(sum(abs2, f) + sum(abs2, g), q^2 * (sum(abs2, Ft) + sum(abs2, Gt)))
+    finally
+        wipe!(fd, gd, ff, gf, ffgg, tf, tg, cf, cg, Ft, Gt)
+    end
 end
 
 fits(v, bits) = (lim = 1 << (bits - 1); all(x -> -lim < x < lim, v))
@@ -167,37 +242,74 @@ fits(v, bits) = (lim = 1 << (bits - 1); all(x -> -lim < x < lim, v))
 # fixedpoint: no floating point (FalconFxp, ePrint 2023/290): table sampling of (f, g), fixed-point
 # GS check and Babai reduction; n = 4..1024.
 const FXP_GS_LIMIT_206 = Int64(round((9999 // 10000 * 117 // 100)^2 * q * big(2)^32))
-function keygen(n::Int; randombytes=sysrandom, maxtries=1000, certified=false, fips206=false, fixedpoint=false)
+# The seed is wiped once it has keyed the ChaCha20 generator, and the generator (state and
+# keystream) when keygen returns or throws. Each candidate's plain-data arrays are wiped in
+# keygen_candidate; only the BigInt values of the NTRU solver are left (SECURITY.md).
+function keygen(n::Int; randombytes::R=sysrandom, maxtries=1000, certified=false, fips206=false, fixedpoint=false) where {R}
     params(n)
     gsf = fips206 ? 0.9999 * 1.17 : 1.17
-    rng = CC.ChaCha20(randombytes(SEED_LEN))
-    for _ in 1:maxtries
-        f, g = fixedpoint ? (FX.gauss_sample_poly(n, rng), FX.gauss_sample_poly(n, rng)) :
-                            (gen_poly(n, rng), gen_poly(n, rng))
-        (fits(f, FG_BITS[logn(n)]) && fits(g, FG_BITS[logn(n)])) || continue
-        if fixedpoint
-            FX.gs_ok(f, g; limit = fips206 ? FXP_GS_LIMIT_206 : FX.GS_LIMIT) || continue
-        else
-            gs_norm2(f, g) > gsf^2 * q && continue
+    seed = randombytes(SEED_LEN)
+    rng = try CC.ChaCha20(seed) finally wipe!(seed) end
+    try
+        for _ in 1:maxtries
+            sk = keygen_candidate(n, rng, gsf, certified, fips206, fixedpoint)
+            sk === nothing || return sk
         end
-        is_invertible(f) || continue
-        local F, G
-        try
-            F, G = (fixedpoint ? FX.ntru_solve : NG.ntru_solve)(BigInt.(f), BigInt.(g))
-        catch
-            continue
-        end
-        (fixedpoint ? FX.reduce! : reduce_FG!)(BigInt.(f), BigInt.(g), F, G)
-        NG.ntru_check(BigInt.(f), BigInt.(g), F, G) || continue
-        (fits(F, FFGG_BITS) && fits(G, FFGG_BITS)) || continue
-        (certified || fips206) && !certify(f, g, Int.(F), Int.(G); fips206).ok && continue
-        return secret_key(f, g, F, G)
+    finally
+        wipe!(rng)
     end
     error("keygen failed in $maxtries tries")
 end
 
-secret_key(f, g, F, G) = (; f=Int.(f), g=Int.(g), F=Int.(F), G=Int.(G),
-                            h=poly_div_modq(g, f), n=length(f))
+# One candidate (f, g) drawn from rng: the secret key, or `nothing` if the candidate is rejected.
+# f, g and every plain-data array derived from them are wiped on every exit; the returned key holds
+# copies (secret_key).
+function keygen_candidate(n, rng, gsf, certified, fips206, fixedpoint)
+    f = fixedpoint ? FX.gauss_sample_poly(n, rng) : gen_poly(n, rng)
+    g = Int[]
+    try
+        g = fixedpoint ? FX.gauss_sample_poly(n, rng) : gen_poly(n, rng)
+        (fits(f, FG_BITS[logn(n)]) && fits(g, FG_BITS[logn(n)])) || return nothing
+        if fixedpoint
+            FX.gs_ok(f, g; limit = fips206 ? FXP_GS_LIMIT_206 : FX.GS_LIMIT) || return nothing
+        else
+            gs_norm2(f, g) > gsf^2 * q && return nothing
+        end
+        is_invertible(f) || return nothing
+        fb, gb = BigInt.(f), BigInt.(g)
+        FG = solve_ntru(fixedpoint, fb, gb)
+        FG === nothing && return nothing
+        F, G = FG
+        (fixedpoint ? FX.reduce! : reduce_FG!)(fb, gb, F, G)
+        NG.ntru_check(fb, gb, F, G) || return nothing
+        (fits(F, FFGG_BITS) && fits(G, FFGG_BITS)) || return nothing
+        if certified || fips206
+            Fi, Gi = Int.(F), Int.(G)
+            ok = try certify(f, g, Fi, Gi; fips206).ok finally wipe!(Fi, Gi) end
+            ok || return nothing
+        end
+        return secret_key(f, g, F, G)
+    finally
+        wipe!(f, g)
+    end
+end
+
+# (F, G), or `nothing` when the solver reports that this (f, g) has no solution (NTRUSolveFailure).
+# Any other exception, InterruptException included, propagates.
+function solve_ntru(fixedpoint, f, g)
+    try
+        return (fixedpoint ? FX.ntru_solve : NG.ntru_solve)(f, g)
+    catch e
+        e isa NG.NTRUSolveFailure || rethrow()
+        return nothing
+    end
+end
+
+# Copies f, g, F, G into a new key; the caller keeps ownership of (and wipes) its own arrays.
+function secret_key(f, g, F, G)
+    h = poly_div_modq(g, f)
+    (; f=Int.(f), g=Int.(g), F=Int.(F), G=Int.(G), h, n=length(f))
+end
 
 "Exact certificate (FalconCertify): every ffLDL leaf in [σmin, σmax] and GS norm ≤ 1.17√q (0.9999·1.17√q with fips206), no floating point."
 function certify(f, g, F, G; fips206=false)
@@ -220,13 +332,19 @@ end
 # Falcon basis [[g,-f],[G,-F]] with ROWS = the lattice basis vectors x^k·(g,-f),
 # x^k·(G,-F). The basis vectors are the COLUMNS of the anticirculant blocks
 # (anticirc(p)·z = negamul(p,z)), so each block is transposed to put them in rows.
+# The returned basis is the caller's; the Float64 copies and the blocks are wiped.
 function ntru_basis(sk)
-    g, f, G, F = Float64.(sk.g), Float64.(sk.f), Float64.(sk.G), Float64.(sk.F)
-    [permutedims(anticirc(g)) permutedims(anticirc(-f));
-     permutedims(anticirc(G)) permutedims(anticirc(-F))]
+    g, mf, G, mF = Float64.(sk.g), .-Float64.(sk.f), Float64.(sk.G), .-Float64.(sk.F)
+    A = (anticirc(g), anticirc(mf), anticirc(G), anticirc(mF))
+    P = map(permutedims, A)
+    B = [P[1] P[2];
+         P[3] P[4]]
+    wipe!(g, mf, G, mF); foreach(wipe!, A); foreach(wipe!, P)
+    B
 end
 
 # ── Klein / GPV sampler over the GS basis ───────────────────────────────────
+# Returns z (the caller wipes it); the running center c is wiped.
 function klein_sample(B, Bgs, gsnorm2, target, σ, σmin, r)
     m = size(B, 1); c = copy(target); z = zeros(Int, m)
     for i in m:-1:1
@@ -236,6 +354,7 @@ function klein_sample(B, Bgs, gsnorm2, target, σ, σmin, r)
         z[i] = zi
         c .-= zi .* @view B[i, :]
     end
+    wipe!(c)
     z
 end
 
@@ -243,8 +362,9 @@ end
 function hash_to_point(msg::AbstractVector{UInt8}, salt::AbstractVector{UInt8}, n::Int)
     k = (1 << 16) ÷ q
     len = 4n + 64
+    inp = catbytes(salt, msg)
     while true
-        stream = Keccak.shake256(vcat(salt, msg), UInt64(len))
+        stream = Keccak.shake256(inp, UInt64(len))
         c = Int[]; i = 1
         while length(c) < n && i + 1 <= length(stream)
             elt = (Int(stream[i]) << 8) + Int(stream[i+1]); i += 2
@@ -265,22 +385,34 @@ function sign_setup_klein(sk)
             v .-= (dot(@view(B[i, :]), @view(Bgs[j, :])) / gsnorm2[j]) .* @view Bgs[j, :]
         end
         Bgs[i, :] .= v; gsnorm2[i] = dot(v, v)
+        wipe!(v)
     end
     (; B, Bgs, gsnorm2)
 end
 
-function sign_poly_klein(sk, gs, msg::AbstractVector{UInt8}; randombytes=sysrandom)
+# As sign_poly: the sampler seed and generator, the lattice coordinates z and every rejected
+# attempt are wiped.
+function sign_poly_klein(sk, gs, msg::AbstractVector{UInt8}; randombytes::R=sysrandom) where {R}
     n = sk.n; p = params(n)
     salt = randombytes(SALT_LEN)
     c = hash_to_point(msg, salt, n)
-    target = Float64.(vcat(c, zeros(Int, n)))           # (c, 0)
+    target = zeros(Float64, 2n); target[1:n] .= c      # (c, 0)
     while true
-        r = CC.ChaCha20(randombytes(SEED_LEN))
-        z = klein_sample(gs.B, gs.Bgs, gs.gsnorm2, target, p.σ, p.σmin, r)
-        s = target .- gs.B' * z                         # (c, 0) − z·B
-        s0 = round.(Int, s[1:n]); s1 = round.(Int, s[n+1:2n])
+        seed = randombytes(SEED_LEN)
+        r = try CC.ChaCha20(seed) catch; wipe!(seed); rethrow() end
+        z = try
+            klein_sample(gs.B, gs.Bgs, gs.gsnorm2, target, p.σ, p.σmin, r)
+        finally
+            wipe!(seed); wipe!(r)
+        end
+        Bz = gs.B' * z
+        s = target .- Bz                                # (c, 0) − z·B
+        wipe!(z, Bz)
+        s0 = round.(Int, @view s[1:n]); s1 = round.(Int, @view s[n+1:2n])
+        wipe!(s)
         norm2 = sum(abs2, s0) + sum(abs2, s1)
         norm2 <= p.β2 && return (; salt, s1, s0, norm2)
+        wipe!(s0, s1)
     end
 end
 
@@ -311,21 +443,31 @@ end
 wipe!(T::FFLeaf) = (T.σ = 0.0; T)
 wipe!(T::FFNode) = (wipe!(T.l10); wipe!(T.t0); wipe!(T.t1); T)
 
+# The split halves, the subtree samples and t0b are wiped (as FalconFpr.ffsample).
 function ffsample(t0, t1, T, σmin, r)
     if T isa FFLeaf
         return (ComplexF64[FS.samplerz(real(t0[1]), T.σ, σmin, r)],
                 ComplexF64[FS.samplerz(real(t1[1]), T.σ, σmin, r)])
     end
-    z1 = FF.merge_fft(ffsample(FF.split_fft(t1)..., T.t1, σmin, r)...)
+    a, b = FF.split_fft(t1)
+    za, zb = ffsample(a, b, T.t1, σmin, r)
+    z1 = FF.merge_fft(za, zb)
     t0b = t0 .+ (t1 .- z1) .* T.l10
-    z0 = FF.merge_fft(ffsample(FF.split_fft(t0b)..., T.t0, σmin, r)...)
+    c, d = FF.split_fft(t0b)
+    zc, zd = ffsample(c, d, T.t0, σmin, r)
+    z0 = FF.merge_fft(zc, zd)
+    wipe!(a, b, za, zb, t0b, c, d, zc, zd)
     (z0, z1)
 end
 
 # Per-key signing data: FFT of B₀ and its normalized ffLDL tree (reused across signatures).
+# The Float64 copies of the key and the Gram matrix are wiped, and the basis and tree too when
+# the key is refused.
 function sign_setup(sk)
-    b00 = FF.fft(Float64.(sk.g)); b01 = FF.fft(-Float64.(sk.f))
-    b10 = FF.fft(Float64.(sk.G)); b11 = FF.fft(-Float64.(sk.F))
+    pg, pf, pG, pF = Float64.(sk.g), .-Float64.(sk.f), Float64.(sk.G), .-Float64.(sk.F)
+    b00 = FF.fft(pg); b01 = FF.fft(pf)
+    b10 = FF.fft(pG); b11 = FF.fft(pF)
+    wipe!(pg, pf, pG, pF)
     g00 = b00 .* conj.(b00) .+ b01 .* conj.(b01)
     g01 = b00 .* conj.(b10) .+ b01 .* conj.(b11)
     g11 = b10 .* conj.(b10) .+ b11 .* conj.(b11)
@@ -334,8 +476,13 @@ function sign_setup(sk)
     wipe!(g00, g01, g11)
     # Every leaf must lie in [σmin, σmax] or the signature distribution is wrong: refuse to sign
     # (NIST FIPS 206 status update, Perlner, Oct 2025; the round-3 spec relies on the GS-norm check alone).
-    all(σ -> p.σmin <= σ <= FS.MAX_SIGMA, leaves(T)) ||
+    L = leaves(T, sizehint!(Float64[], sk.n))
+    ok = all(σ -> p.σmin <= σ <= FS.MAX_SIGMA, L)
+    wipe!(L)
+    if !ok
+        wipe!(T); wipe!(b00, b01, b10, b11)
         throw(ArgumentError("Falcon key has an ffLDL leaf outside [σmin, σmax]; refusing to sign"))
+    end
     (; b00, b01, b10, b11, T)
 end
 leaves(T, out=Float64[]) = T isa FFLeaf ? push!(out, T.σ) : (leaves(T.t0, out); leaves(T.t1, out))
@@ -347,13 +494,17 @@ function target(gs::NamedTuple, c)
 end
 target(gs::FP.Setup, c) = FP.target(gs, c)
 
-# One ffSampling attempt: (s0, s1) = (c, 0) − z·B₀, so s0 + s1·h ≡ c (mod q).
+# One ffSampling attempt: (s0, s1) = (c, 0) − z·B₀, so s0 + s1·h ≡ c (mod q). The samples z,
+# z·B₀ and its inverse FFT are wiped (as FalconFpr.preimage).
 preimage(gs::FP.Setup, c, t0, t1, σmin, r) = FP.preimage(gs, c, t0, t1, σmin, r)
 function preimage(gs::NamedTuple, c, t0, t1, σmin, r)
     z0, z1 = ffsample(t0, t1, gs.T, σmin, r)
-    v0 = round.(Int, real.(FF.ifft(z0 .* gs.b00 .+ z1 .* gs.b10)))
-    v1 = round.(Int, real.(FF.ifft(z0 .* gs.b01 .+ z1 .* gs.b11)))
-    c .- v0, .-v1
+    u0 = z0 .* gs.b00 .+ z1 .* gs.b10; u1 = z0 .* gs.b01 .+ z1 .* gs.b11
+    w0 = FF.ifft(u0); w1 = FF.ifft(u1)
+    v0 = round.(Int, real.(w0)); v1 = round.(Int, real.(w1))
+    s0, s1 = c .- v0, .-v1
+    wipe!(z0, z1, u0, u1, w0, w1, v0, v1)
+    s0, s1
 end
 
 # Leaf range of the integer signer's tree, re-checked before every signature (FalconFpr.check_leaves);
@@ -362,30 +513,50 @@ check_leaves(gs::FP.Setup, σmin) = FP.check_leaves(gs, σmin)
 check_leaves(gs::NamedTuple, σmin) = gs
 
 # ── Sign (spec Alg. 10): one salt, then resample until short and encodable ──
-# Each attempt seeds a fresh ChaCha20 from `randombytes`, as the reference does.
-function sign_poly(sk, gs, msg::AbstractVector{UInt8}; randombytes=sysrandom)
+# Each attempt seeds a fresh ChaCha20 from `randombytes`, as the reference does. The target
+# (t0, t1), every attempt's seed and generator, and each rejected (s0, s1) are wiped, also when
+# signing throws.
+function sign_poly(sk, gs, msg::AbstractVector{UInt8}; randombytes::R=sysrandom) where {R}
     n = sk.n; p = params(n)
     check_leaves(gs, p.σmin)
     salt = randombytes(SALT_LEN)
     c = hash_to_point(msg, salt, n)
     t0, t1 = target(gs, c)
-    while true
-        seed = randombytes(SEED_LEN); r = CC.ChaCha20(seed)
-        s0, s1 = preimage(gs, c, t0, t1, p.σmin, r)
-        wipe!(seed); wipe!(r)
-        norm2 = sum(abs2, s0) + sum(abs2, s1)
-        norm2 <= p.β2 || continue
-        enc = FE.compress(s1, (p.sigbytes - 1 - SALT_LEN) * 8)
-        enc === nothing && continue
+    try
+        while true
+            s0, s1 = sample_preimage(gs, c, t0, t1, p.σmin, randombytes)
+            norm2 = sum(abs2, s0) + sum(abs2, s1)
+            if norm2 <= p.β2
+                enc = FE.compress(s1, (p.sigbytes - 1 - SALT_LEN) * 8)
+                enc === nothing || return (; salt, s1, s0, norm2, enc)
+            end
+            wipe!(s0, s1)
+        end
+    finally
         wipe!(t0, t1)
-        return (; salt, s1, s0, norm2, enc)
+    end
+end
+
+"""
+    sample_preimage(gs, c, t0, t1, σmin, randombytes) -> (s0, s1)
+
+One ffSampling attempt with SamplerZ fed by a ChaCha20 generator seeded from
+`randombytes(SEED_LEN)`; the seed and the generator (state and keystream) are wiped on every exit.
+"""
+function sample_preimage(gs, c, t0, t1, σmin, randombytes::R) where {R}
+    seed = randombytes(SEED_LEN)
+    r = try CC.ChaCha20(seed) catch; wipe!(seed); rethrow() end
+    try
+        return preimage(gs, c, t0, t1, σmin, r)
+    finally
+        wipe!(seed); wipe!(r)
     end
 end
 
 # ── Verify (math level) ─────────────────────────────────────────────────────
 function verify_poly(pk_h, n::Int, msg::AbstractVector{UInt8}, sig)
     p = params(n)
-    length(sig.s1) == n || return false
+    (length(sig.s1) == n && length(pk_h) == n) || return false
     c = hash_to_point(msg, sig.salt, n)
     s0 = centermod.(c .- poly_mul_modq(sig.s1, pk_h))   # s0 = c − s1·h mod q (centered)
     norm2 = sum(abs2, s0) + sum(abs2, sig.s1)
@@ -421,18 +592,22 @@ end
 # Returns the unsigned fields, or `nothing` on a length mismatch or non-zero padding.
 function unpack_bits(bytes, n, bits)
     length(bytes) == cld(n * bits, 8) || return nothing
-    vals = Vector{Int}(undef, n); acc = UInt64(0); nacc = 0; k = 0; mask = (UInt64(1) << bits) - 1
-    for b in bytes
-        acc = (acc << 8) | b; nacc += 8
-        while nacc >= bits && k < n
-            nacc -= bits; k += 1; vals[k] = Int((acc >> nacc) & mask)
+    vals = zeros(Int, n); acc = UInt64(0); nacc = 0; k = 0; mask = (UInt64(1) << bits) - 1
+    try                                                     # a read of `bytes` can throw
+        for b in bytes
+            acc = (acc << 8) | b; nacc += 8
+            while nacc >= bits && k < n
+                nacc -= bits; k += 1; vals[k] = Int((acc >> nacc) & mask)
+            end
+            acc &= (UInt64(1) << nacc) - 1
         end
-        acc &= (UInt64(1) << nacc) - 1
+    catch
+        wipe!(vals); rethrow()
     end
-    (k == n && acc == 0) ? vals : nothing
+    (k == n && acc == 0) ? vals : (wipe!(vals); nothing)   # secret-key fields: no partial copy left
 end
 
-encode_pk(h, n) = vcat(UInt8(logn(n)), pack_bits(h, 14))
+encode_pk(h, n) = catbytes(UInt8(logn(n)), pack_bits(h, 14))
 
 function decode_pk(pk::AbstractVector{UInt8}, n)
     (length(pk) == pk_bytes(n) && pk[1] == logn(n)) || return nothing
@@ -443,7 +618,7 @@ end
 function encode_sk(sk)
     n = sk.n; b = FG_BITS[logn(n)]
     pf, pg, pF = pack_bits(sk.f, b), pack_bits(sk.g, b), pack_bits(sk.F, FFGG_BITS)
-    out = vcat(UInt8(0x50 + logn(n)), pf, pg, pF)
+    out = catbytes(UInt8(0x50 + logn(n)), pf, pg, pF)
     wipe!(pf, pg, pF)
     out
 end
@@ -458,7 +633,9 @@ function decode_signed(bytes, n, bits)
     any(==(-(1 << (bits - 1))), s) ? (wipe!(s); nothing) : s
 end
 
-# G is not stored: G = (q + g·F)/f mod q, exact once centered since |G| < 128.
+# G is not stored: G = (q + g·F)/f mod q, exact once centered since |G| < 128. The decoded
+# f, g, F, G, the product g·F and every transform the helpers make are wiped on every exit; G is
+# centered in place, so no uncentered copy (G mod q) is left.
 function decode_sk(skb::AbstractVector{UInt8})
     isempty(skb) && return nothing
     lg = Int(skb[1]) - 0x50
@@ -466,27 +643,37 @@ function decode_sk(skb::AbstractVector{UInt8})
     n = 1 << lg; b = FG_BITS[lg]
     length(skb) == sk_bytes(n) || return nothing
     lf = (n * b) ÷ 8
-    f = decode_signed(@view(skb[2:1+lf]), n, b)
-    g = decode_signed(@view(skb[2+lf:1+2lf]), n, b)
-    F = decode_signed(@view(skb[2+2lf:end]), n, FFGG_BITS)
+    f = g = F = nothing
+    try                                                     # a read of `skb` can throw
+        f = decode_signed(@view(skb[2:1+lf]), n, b)
+        g = decode_signed(@view(skb[2+lf:1+2lf]), n, b)
+        F = decode_signed(@view(skb[2+2lf:end]), n, FFGG_BITS)
+    catch
+        for x in (f, g, F); x === nothing || wipe!(x); end
+        rethrow()
+    end
     if f === nothing || g === nothing || F === nothing
         for x in (f, g, F); x === nothing || wipe!(x); end
         return nothing
     end
     sk = nothing; gF = Int[]; G = Int[]
-    if is_invertible(f)
-        gF = poly_mul_modq(g, F); gF[1] = mod(gF[1] + q, q)
-        G = centermod.(poly_div_modq(gF, f))
-        if fits(G, FFGG_BITS) && ntru_check_int(f, g, F, G)
-            sk = secret_key(f, g, F, G)
+    try
+        if is_invertible(f)
+            gF = poly_mul_modq(g, F); gF[1] = mod(gF[1] + q, q)
+            G = poly_div_modq(gF, f)
+            G .= centermod.(G)
+            if fits(G, FFGG_BITS) && ntru_check_int(f, g, F, G)
+                sk = secret_key(f, g, F, G)
+            end
         end
+    finally
+        wipe!(f, g, F, G, gF)
     end
-    wipe!(f, g, F, G, gF)
     sk
 end
 
 # Padded signature: header 0x30+logn ‖ salt(40) ‖ compress(s1), fixed length.
-encode_sig(sig, n) = vcat(UInt8(0x30 + logn(n)), sig.salt, sig.enc)
+encode_sig(sig, n) = catbytes(UInt8(0x30 + logn(n)), sig.salt, sig.enc)
 
 function decode_sig(sigb::AbstractVector{UInt8}, n)
     p = params(n)
@@ -500,10 +687,21 @@ struct ExpandedKey{S<:NamedTuple}
     sk::S
     gs::FP.Setup                                   # integer-emulated signer (falcon_fpr.jl)
 end
+# Secret material: printing shows the degree only.
+Base.show(io::IO, ek::ExpandedKey) = print(io, "Falcon.ExpandedKey(n = ", ek.sk.n, ", <secret>)")
+Base.show(io::IO, ::FFLeaf) = print(io, "Falcon.FFLeaf(<secret>)")
+Base.show(io::IO, T::FFNode) = print(io, "Falcon.FFNode(n = ", length(T.l10), ", <secret>)")
 expand_sk(sk::NamedTuple) = ExpandedKey(sk, FP.setup(sk, params(sk.n).σ, params(sk.n).σmin))
+# The decoded key belongs to the ExpandedKey; if expansion refuses the key (a leaf outside
+# [σmin, σmax], or the fault check), it is wiped before the error propagates.
 function expand_sk(skb::AbstractVector{UInt8})
     sk = decode_sk(skb); sk === nothing && throw(ArgumentError("invalid Falcon secret key"))
-    expand_sk(sk)
+    try
+        return expand_sk(sk)
+    catch
+        wipe_sk!(sk)
+        rethrow()
+    end
 end
 wipe_sk!(sk) = (wipe!(sk.f, sk.g, sk.F, sk.G); sk)
 function wipe!(ek::ExpandedKey)
@@ -512,21 +710,35 @@ function wipe!(ek::ExpandedKey)
     ek
 end
 
-function keypair(n::Int; randombytes=sysrandom, certified=false, fips206=false, fixedpoint=false)
+function keypair(n::Int; randombytes::R=sysrandom, certified=false, fips206=false, fixedpoint=false) where {R}
     sk = keygen(n; randombytes, certified, fips206, fixedpoint)
-    pk, skb = encode_pk(sk.h, n), encode_sk(sk)
-    wipe_sk!(sk)
-    pk, skb
+    try
+        return encode_pk(sk.h, n), encode_sk(sk)
+    finally
+        wipe_sk!(sk)
+    end
 end
 
-sign(msg::AbstractVector{UInt8}, sk::NamedTuple; randombytes=sysrandom) = sign(msg, expand_sk(sk); randombytes)
-function sign(msg::AbstractVector{UInt8}, skb::AbstractVector{UInt8}; randombytes=sysrandom)
-    ek = expand_sk(skb)
-    sig = sign(msg, ek; randombytes)
-    wipe!(ek)
-    sig
+# The signing data built for one call (FFT basis and ffLDL tree) is wiped on every exit; the
+# caller's key is left as it is.
+function sign(msg::AbstractVector{UInt8}, sk::NamedTuple; randombytes::R=sysrandom) where {R}
+    ek = expand_sk(sk)
+    try
+        return sign(msg, ek; randombytes)
+    finally
+        wipe!(ek.gs)
+    end
 end
-function sign(msg::AbstractVector{UInt8}, ek::ExpandedKey; randombytes=sysrandom)
+# The key decoded and expanded for one call is wiped on every exit, also when signing throws.
+function sign(msg::AbstractVector{UInt8}, skb::AbstractVector{UInt8}; randombytes::R=sysrandom) where {R}
+    ek = expand_sk(skb)
+    try
+        return sign(msg, ek; randombytes)
+    finally
+        wipe!(ek)
+    end
+end
+function sign(msg::AbstractVector{UInt8}, ek::ExpandedKey; randombytes::R=sysrandom) where {R}
     encode_sig(sign_poly(ek.sk, ek.gs, msg; randombytes), ek.sk.n)
 end
 

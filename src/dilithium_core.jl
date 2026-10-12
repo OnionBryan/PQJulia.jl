@@ -187,7 +187,7 @@ end
 function poly_uniform!(a::Vector{Int32}, seed::Vector{UInt8}, nonce::UInt16)
     # SHAKE128(seed || nonce_le16) with re-squeeze loop (C ref: poly.c:344-368)
     # SHAKE128_RATE = 168; initial buffer = ceil(768/168) * 168 = 840 bytes (5 blocks)
-    input = vcat(seed, UInt8[nonce & 0xff, (nonce >> 8) & 0xff])
+    input = catbytes(seed, nonce % UInt8, (nonce >> 8) % UInt8)
     nblocks = (768 + 168 - 1) ÷ 168  # = 5
     total_out = nblocks * 168         # = 840
     buf = Keccak.shake128(input, UInt64(total_out))
