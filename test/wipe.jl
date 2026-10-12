@@ -49,11 +49,25 @@ end
 primitive type Wipe24 24 end
 
 @testset "wipe! storage: barrier, padding, read-only arrays" begin
-    for f in (wipe_strided_local, wipe_transposed_local)
-        ir = split(sprint(io -> code_llvm(io, f, (UInt64,); debuginfo=:none)), '\n')
-        asm = filter(l -> occursin("asm sideeffect", l), ir)
-        @test !isempty(asm) && !any(l -> occursin("ptr null", l), asm)
-        @test any(l -> occursin(r"store .*(zeroinitializer| 0,)", l) || occursin("scatter", l), ir)
+    # The barrier must receive the storage pointer (never null) and the zeroing stores must
+    # survive optimisation. Both are checked in the out-of-line method and, when the compiler
+    # inlines `wipe!` into a caller whose array is otherwise dead (Julia 1.12 inlines both
+    # cases, 1.13 only the strided view), in that caller as well.
+    llvm(f, T) = split(sprint(io -> code_llvm(io, f, T; debuginfo=:none)), '\n')
+    barrier_ok(ir) = (asm = filter(l -> occursin("asm sideeffect", l), ir);
+                      !isempty(asm) && !any(l -> occursin("ptr null", l), asm))
+    zeroes(ir) = any(l -> occursin(r"store .*(zeroinitializer| 0,)", l) || occursin("scatter", l) ||
+                          (occursin("llvm.memset", l) && !occursin("gcframe", l)), ir)
+    for (f, T) in ((wipe_strided_local, typeof(view(Vector{UInt64}(undef, 16), 1:2:16))),
+                   (wipe_transposed_local, typeof(transpose(Matrix{UInt64}(undef, 4, 4)))))
+        callee = llvm(W.wipe!, (T,))
+        @test barrier_ok(callee) && zeroes(callee)
+        caller = llvm(f, (UInt64,))
+        if any(l -> occursin("asm sideeffect", l), caller)
+            @test barrier_ok(caller) && zeroes(caller)
+        else
+            @test any(l -> occursin(r"call .*wipe!", l), caller)   # out-of-line call, stores kept
+        end
     end
     # Element stride above sizeof(T): every element is cleared, as in the Array method.
     v = [Core.Intrinsics.trunc_int(Wipe24, 0x00abcdef) for _ in 1:8]
